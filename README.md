@@ -42,6 +42,9 @@ Create a `.env` file in the project root:
 ```env
 ELEVENLABS_API_KEY=your_elevenlabs_api_key
 AGENT_ID=your_elevenlabs_agent_id
+ELEVENLABS_VOICE_ID=your_elevenlabs_voice_id
+GROQ_API_KEY=your_groq_api_key
+DEEPGRAM_API_KEY=your_deepgram_api_key
 ELEVEN_LABS_WEBHOOK_SECRET=your_webhook_secret
 GOOGLE_CREDENTIALS_JSON=path/to/google_credentials.json
 ```
@@ -177,6 +180,9 @@ On successful booking:
 |----------|-------------|
 | `ELEVENLABS_API_KEY` | ElevenLabs API key |
 | `AGENT_ID` | ElevenLabs Conversational AI agent ID |
+| `ELEVENLABS_VOICE_ID` | ElevenLabs voice ID for phone-call TTS |
+| `GROQ_API_KEY` | Groq API key for the LLM |
+| `DEEPGRAM_API_KEY` | Deepgram API key for live transcription |
 | `ELEVEN_LABS_WEBHOOK_SECRET` | Webhook signing secret for HMAC verification |
 
 > Email (SMTP) and Google Calendar credentials are currently hardcoded in `settings.py` and `appointment/services/google_calender.py`. Move these to `.env` before deploying to production.

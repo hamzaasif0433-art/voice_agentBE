@@ -14,11 +14,11 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from the project .env file.
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -36,6 +36,8 @@ ALLOWED_HOSTS = ['*']  # Allow all hosts for development
 # Application definition
 
 INSTALLED_APPS = [
+    "daphne",
+    "channels",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -46,7 +48,8 @@ INSTALLED_APPS = [
     "rest_framework",
     "menu",
     "Analytics",
-    "appointment"
+    "appointment",
+    'voice'
 ]
 EMAIL_BACKEND    = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST       = 'smtp.gmail.com'
@@ -84,6 +87,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'kfc_api.wsgi.application'
+ASGI_APPLICATION = 'kfc_api.asgi.application'
 
 
 # Database
@@ -158,4 +162,7 @@ REST_FRAMEWORK = {
 # ElevenLabs Configuration
 ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
 ELEVENLABS_AGENT_ID = os.getenv('AGENT_ID')
+ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID')
+GROQ_API_KEY = os.getenv('GROQ_API_KEY') 
+DEEPGRAM_API_KEY = os.getenv('DEEPGRAM_API_KEY')
 
