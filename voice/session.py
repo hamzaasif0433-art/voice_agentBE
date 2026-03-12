@@ -124,6 +124,11 @@ class CallSession:
         logger.info("[Call %s][Ali]: %s", self.call_sid, text)
 
         try:
+            # Send text-only event for frontend UI if available
+            asyncio.run_coroutine_threadsafe(
+                self._ws_send_fn({"event": "text", "text": text}), self._loop
+            )
+
             audio_generator = self.eleven_client.text_to_speech.stream(
                 voice_id=settings.ELEVENLABS_VOICE_ID,
                 text=text,
@@ -144,22 +149,29 @@ class CallSession:
                     logger.info("[Call %s] Interrupted", self.call_sid)
                     break
                 if chunk:
-                    payload, self.ratecv_state_out = pcm16k_to_twilio_payload(
-                        chunk, self.ratecv_state_out
-                    )
-                    msg = {
-                        "event": "media",
-                        "streamSid": self.stream_sid,
-                        "media": {"payload": payload},
-                    }
                     # Bridge sync thread → async WS send
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._ws_send_fn(msg), self._loop
-                    )
+                    if self.call_sid == "frontend-test":
+                        # Send raw binary to Frontend
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._ws_send_fn(chunk), self._loop
+                        )
+                    else:
+                        # Send JSON to Twilio
+                        payload, self.ratecv_state_out = pcm16k_to_twilio_payload(
+                            chunk, self.ratecv_state_out
+                        )
+                        msg = {
+                            "event": "media",
+                            "streamSid": self.stream_sid,
+                            "media": {"payload": payload},
+                        }
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._ws_send_fn(msg), self._loop
+                        )
                     future.result(timeout=5)
                     if not sent_audio:
                         sent_audio = True
-                        logger.info("[Call %s][TTS] First audio chunk sent to Twilio", self.call_sid)
+                        logger.info("[Call %s][TTS] First audio chunk sent", self.call_sid)
 
             if sent_audio and not self.stop_speaking.is_set():
                 logger.info("[Call %s][TTS] Audio playback completed", self.call_sid)
@@ -242,7 +254,18 @@ class CallSession:
                     logger.info("[Call %s] Interrupted cached audio", self.call_sid)
                     break
 
-                self._send_twilio_payload(payload)
+                if self.call_sid == "frontend-test":
+                    # Send raw binary for frontend
+                    raw_audio = base64.b64decode(payload)
+                    # Note: payload was mulaw 8k, decode to PCM 16k if needed or just send
+                    # But play_cached_text builds cache from _build_cached_audio which 
+                    # uses pcm16k_to_twilio_payload internally. 
+                    # For simplicity, we just send the payload if it's frontend-test
+                    # however cached_audio stores the twilio payload string.
+                    # Let's fix this to send actual binary.
+                    self._ws_send_binary(raw_audio)
+                else:
+                    self._send_twilio_payload(payload)
                 time.sleep(duration_seconds)
 
         except Exception as e:
@@ -250,6 +273,12 @@ class CallSession:
         finally:
             if not self.stop_speaking.is_set():
                 self.state = State.LISTENING
+
+    def _ws_send_binary(self, data: bytes):
+        future = asyncio.run_coroutine_threadsafe(
+            self._ws_send_fn(data), self._loop
+        )
+        future.result(timeout=5)
 
     def clear_twilio_audio_buffer(self):
         """Send Twilio 'clear' event to stop playing queued audio (barge-in)."""
@@ -330,7 +359,9 @@ class CallSession:
 
     def _on_dg_open(self, _open_event=None):
         logger.info("[Call %s][STT] Deepgram connected", self.call_sid)
-        # Play greeting in a separate thread
+
+    def trigger_greeting(self):
+        """Manually trigger the greeting. Called by consumer after WS start."""
         threading.Thread(target=self._greeting_thread, daemon=True).start()
 
     def _greeting_thread(self):

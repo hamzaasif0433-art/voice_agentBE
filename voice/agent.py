@@ -1,12 +1,3 @@
-"""
-Reusable voice agent logic, extracted from main2.py.
-
-All functions accept a session object (CallSession) that holds per-call state.
-This module contains constants (SYSTEM_PROMPT, TOOLS, GREETING) and session-aware
-functions (execute_tool, call_groq, call_gemini, get_trimmed_messages, llm_and_speak).
-
-No PyAudio, no Silero VAD, no module-level globals.
-"""
 import json
 import re
 import time
@@ -24,7 +15,6 @@ GEMINI_MODEL = "gemini-2.5-flash"
 BACKEND_URL = "http://localhost:8000"
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────
-# Copied verbatim from main2.py
 SYSTEM_PROMPT = """You are Ali, a male Urdu-speaking appointment scheduling assistant. ONLY schedule appointments. Never say you are an AI.
 
 ## LANGUAGE
@@ -187,6 +177,7 @@ TOOLS = [
 ]
 
 # ── GREETING ──────────────────────────────────────────────────────────
+# GREETING = "Assalam o Alaikum! Main Ali hoon, aapka appointment assistant. aaj aapki kya khidmat kar sakta hoon?"
 GREETING = "السلام علیکم! میں علی ہوں، آپ کا اپائنٹمنٹ اسسٹنٹ۔ آج آپ کی کیا خدمت کر سکتا ہوں؟"
 
 

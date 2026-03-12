@@ -26,16 +26,24 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
     """One instance per Twilio media stream (i.e., per phone call)."""
 
     async def connect(self):
-        """Accept the WebSocket from Twilio."""
+        """Accept the WebSocket from client."""
         await self.accept()
         self._session = None
-        logger.info("[TwilioWS] Connection accepted")
+        logger.info("[WS] Connection accepted - checking for auto-start")
+        
+        # For frontend (Next.js) connections, we auto-start immediately on connect
+        # instead of waiting for a Twilio 'start' JSON event or first binary frame.
+        await self._handle_start({"start": {"callSid": "frontend-test", "streamSid": "frontend-stream"}})
 
     async def receive(self, text_data=None, bytes_data=None):
         """
         Twilio sends all messages as text (JSON).
         Binary frames are never sent by Twilio media streams.
         """
+        if bytes_data:
+            await self._handle_binary(bytes_data)
+            return
+
         if not text_data:
             return
 
@@ -76,6 +84,20 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
     # Event handlers
     # ══════════════════════════════════════════════════════════════════
 
+    async def _handle_binary(self, data: bytes):
+        """
+        Handle raw binary audio from frontend (Next.js).
+        If session isn't started yet, we auto-start it on first binary frame.
+        """
+        if not self._session:
+            # Auto-start session for frontend testing if not already started via JSON 'start'
+            logger.info("[FrontendWS] Binary received, auto-starting session")
+            await self._handle_start({"start": {"callSid": "frontend-test", "streamSid": "frontend-stream"}})
+
+        # Next.js usually sends PCM16 16kHz directly or we handle it here.
+        # Deepgram expects 16kHz Mono PCM16.
+        await asyncio.to_thread(self._session.send_audio_to_deepgram, data)
+
     async def _handle_start(self, msg):
         """
         Twilio 'start' event. Contains streamSid, callSid, mediaFormat, etc.
@@ -108,6 +130,12 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
 
             # Start Deepgram in a thread (synchronous SDK)
             await asyncio.to_thread(self._session.start_deepgram)
+
+            # Notify frontend that session is ready
+            await self._send_json({"event": "session_ready"})
+
+            # Trigger greeting immediately after connection
+            await asyncio.to_thread(self._session.trigger_greeting)
         except Exception as exc:
             logger.exception("[TwilioWS] Failed to start call session: %s", exc)
             self._session = None
@@ -152,9 +180,12 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
     # WebSocket send helper
     # ══════════════════════════════════════════════════════════════════
 
-    async def _send_json(self, data: dict):
-        """Send a JSON message back to Twilio over the WebSocket."""
+    async def _send_json(self, data):
+        """Send message back to client. Handles both dicts (JSON) and bytes (Binary)."""
         try:
-            await self.send(text_data=json.dumps(data))
+            if isinstance(data, bytes):
+                await self.send(bytes_data=data)
+            else:
+                await self.send(text_data=json.dumps(data))
         except Exception as e:
             logger.error("[TwilioWS] Failed to send: %s", e)
