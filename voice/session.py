@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 _GREETING_AUDIO_CACHE = {}
 _GREETING_AUDIO_CACHE_LOCK = threading.Lock()
 
-TTS_MODEL_ID = "eleven_v3"
+TTS_MODEL_ID = "eleven_multilingual_v2"
+TTS_FALLBACK_MODEL_ID = "eleven_multilingual_v2"
 TTS_SPEED = 1.05
 
 
@@ -108,6 +109,35 @@ class CallSession:
     # speak_fn: TTS → Twilio WebSocket
     # ══════════════════════════════════════════════════════════════════
 
+    def _create_tts_stream(self, text: str):
+        """Create a TTS stream and fallback to a stable model if primary fails."""
+        last_error = None
+        for model_id in (TTS_MODEL_ID, TTS_FALLBACK_MODEL_ID):
+            try:
+                return self.eleven_client.text_to_speech.stream(
+                    voice_id=settings.ELEVENLABS_VOICE_ID,
+                    text=text,
+                    model_id=model_id,
+                    output_format="pcm_16000",
+                    voice_settings=VoiceSettings(
+                        stability=0.45,
+                        similarity_boost=0.85,
+                        style=0.35,
+                        use_speaker_boost=True,
+                        speed=TTS_SPEED,
+                    ),
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "[Call %s][TTS] Model '%s' failed, trying fallback: %s",
+                    self.call_sid,
+                    model_id,
+                    exc,
+                )
+
+        raise RuntimeError(f"Unable to create TTS stream: {last_error}")
+
     def speak_fn(self, text: str):
         """
         Synchronous function (called from threaded llm_and_speak).
@@ -117,6 +147,8 @@ class CallSession:
         3. Send Twilio 'media' message over WebSocket
         4. Respect self.stop_speaking for barge-in
         """
+        # Reset prior barge-in so new replies can speak.
+        self.stop_speaking.clear()
         self.state = State.SPEAKING
         logger.info(
             "[Call %s][TTS] Synthesizing response (%d chars): %s",
@@ -132,19 +164,7 @@ class CallSession:
                 self._ws_send_fn({"event": "text", "text": text}), self._loop
             )
 
-            audio_generator = self.eleven_client.text_to_speech.stream(
-                voice_id=settings.ELEVENLABS_VOICE_ID,
-                text=text,
-                model_id=TTS_MODEL_ID,
-                output_format="pcm_16000",
-                voice_settings=VoiceSettings(
-                    stability=0.45,
-                    similarity_boost=0.85,
-                    style=0.35,
-                    use_speaker_boost=True,
-                    speed=TTS_SPEED,
-                ),
-            )
+            audio_generator = self._create_tts_stream(text)
 
             sent_audio = False
             for chunk in audio_generator:
@@ -200,19 +220,7 @@ class CallSession:
         cached_chunks = []
         ratecv_state_out = None
 
-        audio_generator = self.eleven_client.text_to_speech.stream(
-            voice_id=settings.ELEVENLABS_VOICE_ID,
-            text=text,
-            model_id=TTS_MODEL_ID,
-            output_format="pcm_16000",
-            voice_settings=VoiceSettings(
-                stability=0.45,
-                similarity_boost=0.85,
-                style=0.35,
-                use_speaker_boost=True,
-                speed=TTS_SPEED,
-            ),
-        )
+        audio_generator = self._create_tts_stream(text)
 
         for chunk in audio_generator:
             if not chunk:
@@ -237,7 +245,7 @@ class CallSession:
 
         return tuple(cached_chunks)
 
-    def _get_cached_audio(self, cache_key: tuple[str, str], text: str):
+    def _get_cached_audio(self, cache_key: tuple[str, ...], text: str):
         cached_audio = _GREETING_AUDIO_CACHE.get(cache_key)
         if cached_audio is not None:
             return cached_audio
@@ -251,7 +259,9 @@ class CallSession:
 
         return cached_audio
 
-    def play_cached_text(self, text: str, cache_key: tuple[str, str]):
+    def play_cached_text(self, text: str, cache_key: tuple[str, ...]):
+        # Reset prior barge-in so greeting can always play for a new turn.
+        self.stop_speaking.clear()
         self.state = State.SPEAKING
         logger.info(
             "[Call %s][TTS] Playing cached audio (%d chars): %s",
@@ -370,6 +380,7 @@ class CallSession:
 
     def trigger_greeting(self):
         """Manually trigger the greeting. Called by consumer after WS start."""
+        self.stop_speaking.clear()
         threading.Thread(target=self._greeting_thread, daemon=True).start()
 
     def _greeting_thread(self):
@@ -377,7 +388,7 @@ class CallSession:
 
         self.play_cached_text(
             GREETING,
-            cache_key=(settings.ELEVENLABS_VOICE_ID, GREETING),
+            cache_key=(settings.ELEVENLABS_VOICE_ID, TTS_MODEL_ID, str(TTS_SPEED), GREETING),
         )
         with self.llm_lock:
             self.conversation.append({"role": "assistant", "content": GREETING})

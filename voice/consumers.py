@@ -29,11 +29,7 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
         """Accept the WebSocket from client."""
         await self.accept()
         self._session = None
-        logger.info("[WS] Connection accepted - checking for auto-start")
-        
-        # For frontend (Next.js) connections, we auto-start immediately on connect
-        # instead of waiting for a Twilio 'start' JSON event or first binary frame.
-        await self._handle_start({"start": {"callSid": "frontend-test", "streamSid": "frontend-stream"}})
+        logger.info("[WS] Connection accepted")
 
     async def receive(self, text_data=None, bytes_data=None):
         """
@@ -121,6 +117,11 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
         )
 
         try:
+            # If start arrives more than once on same socket, replace cleanly.
+            if self._session:
+                await asyncio.to_thread(self._session.cleanup)
+                self._session = None
+
             self._session = CallSession(
                 call_sid=call_sid,
                 stream_sid=stream_sid,
@@ -135,7 +136,7 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
             await self._send_json({"event": "session_ready"})
 
             # Trigger greeting immediately after connection
-            await asyncio.to_thread(self._session.trigger_greeting)
+            self._session.trigger_greeting()
         except Exception as exc:
             logger.exception("[TwilioWS] Failed to start call session: %s", exc)
             self._session = None
