@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 _GREETING_AUDIO_CACHE = {}
 _GREETING_AUDIO_CACHE_LOCK = threading.Lock()
 
+TTS_MODEL_ID = "eleven_v3"
+TTS_SPEED = 1.05
+
 
 def _require_voice_settings() -> None:
     missing = [
@@ -132,14 +135,14 @@ class CallSession:
             audio_generator = self.eleven_client.text_to_speech.stream(
                 voice_id=settings.ELEVENLABS_VOICE_ID,
                 text=text,
-                model_id="eleven_multilingual_v2",
+                model_id=TTS_MODEL_ID,
                 output_format="pcm_16000",
                 voice_settings=VoiceSettings(
                     stability=0.45,
                     similarity_boost=0.85,
                     style=0.35,
                     use_speaker_boost=True,
-                    speed=0.95,
+                    speed=TTS_SPEED,
                 ),
             )
 
@@ -200,14 +203,14 @@ class CallSession:
         audio_generator = self.eleven_client.text_to_speech.stream(
             voice_id=settings.ELEVENLABS_VOICE_ID,
             text=text,
-            model_id="eleven_multilingual_v2",
+            model_id=TTS_MODEL_ID,
             output_format="pcm_16000",
             voice_settings=VoiceSettings(
                 stability=0.45,
                 similarity_boost=0.85,
                 style=0.35,
                 use_speaker_boost=True,
-                speed=0.95,
+                speed=TTS_SPEED,
             ),
         )
 
@@ -218,8 +221,19 @@ class CallSession:
             payload, ratecv_state_out = pcm16k_to_twilio_payload(
                 chunk, ratecv_state_out
             )
-            duration_seconds = len(base64.b64decode(payload)) / 8000.0
-            cached_chunks.append((payload, duration_seconds))
+            # Keep both formats in cache:
+            # - twilio_payload: mulaw/8k for Twilio media stream
+            # - frontend_pcm16: raw PCM16/16k for browser websocket playback
+            twilio_duration_seconds = len(base64.b64decode(payload)) / 8000.0
+            frontend_duration_seconds = len(chunk) / 32000.0
+            cached_chunks.append(
+                {
+                    "twilio_payload": payload,
+                    "twilio_duration_seconds": twilio_duration_seconds,
+                    "frontend_pcm16": chunk,
+                    "frontend_duration_seconds": frontend_duration_seconds,
+                }
+            )
 
         return tuple(cached_chunks)
 
@@ -249,24 +263,18 @@ class CallSession:
         try:
             cached_audio = self._get_cached_audio(cache_key, text)
 
-            for payload, duration_seconds in cached_audio:
+            for item in cached_audio:
                 if self.stop_speaking.is_set():
                     logger.info("[Call %s] Interrupted cached audio", self.call_sid)
                     break
 
                 if self.call_sid == "frontend-test":
-                    # Send raw binary for frontend
-                    raw_audio = base64.b64decode(payload)
-                    # Note: payload was mulaw 8k, decode to PCM 16k if needed or just send
-                    # But play_cached_text builds cache from _build_cached_audio which 
-                    # uses pcm16k_to_twilio_payload internally. 
-                    # For simplicity, we just send the payload if it's frontend-test
-                    # however cached_audio stores the twilio payload string.
-                    # Let's fix this to send actual binary.
-                    self._ws_send_binary(raw_audio)
+                    # Frontend expects PCM16 chunks, not mulaw bytes.
+                    self._ws_send_binary(item["frontend_pcm16"])
+                    time.sleep(item["frontend_duration_seconds"])
                 else:
-                    self._send_twilio_payload(payload)
-                time.sleep(duration_seconds)
+                    self._send_twilio_payload(item["twilio_payload"])
+                    time.sleep(item["twilio_duration_seconds"])
 
         except Exception as e:
             logger.error("[Call %s][Cached Audio Error]: %s", self.call_sid, e)
