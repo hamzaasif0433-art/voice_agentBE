@@ -18,3 +18,4 @@ pyparsing==3.3.2
 requests==2.32.5
 uritemplate==4.2.0
 urllib3==2.6.3
+gunicorn
