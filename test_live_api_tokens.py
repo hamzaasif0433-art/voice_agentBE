@@ -9,18 +9,28 @@ _kfc_api_dir = Path(__file__).resolve().parent
 _env_file = _kfc_api_dir / ".env"
 load_dotenv(str(_env_file), override=True)
 
-_creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-if _creds_path and not os.path.isabs(_creds_path):
-    _abs_creds = str(_kfc_api_dir / _creds_path)
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _abs_creds
-
+import json
+from google.oauth2 import service_account
+import vertexai
 from google import genai
 from google.genai import types
 
 async def main():
-    _proj = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
-    _loc = os.getenv("GOOGLE_CLOUD_REGION", "europe-west4").strip()
-
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not service_account_json:
+        raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.")
+    sa_info = json.loads(service_account_json)
+    credentials = service_account.Credentials.from_service_account_info(
+        sa_info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    _proj = os.getenv("VERTEX_PROJECT", "").strip()
+    _loc = os.getenv("VERTEX_LOCATION", "europe-west4").strip()
+    vertexai.init(
+        project=_proj,
+        location=_loc,
+        credentials=credentials,
+    )
     client = genai.Client(vertexai=True, project=_proj, location=_loc)
     
     live_config = types.LiveConnectConfig(

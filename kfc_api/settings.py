@@ -43,29 +43,10 @@ def _resolve_runtime_path(raw_path: str | None) -> str | None:
     return str(candidate.resolve())
 
 
-raw_google_credentials = os.getenv('GOOGLE_APPLICATION_CREDENTIALS') or os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE')
-
-# Allow JSON credentials directly in env (e.g. Railway).
-# Writing to a temp file lets ALL Google SDKs (Gemini, Calendar, etc.) work
-# without any per-service changes — they all read GOOGLE_APPLICATION_CREDENTIALS.
-if raw_google_credentials and raw_google_credentials.strip().startswith('{'):
-    _creds_json = raw_google_credentials.strip()
-    # Validate it is parseable before writing.
-    json.loads(_creds_json)
-    _tmp = tempfile.NamedTemporaryFile(
-        mode='w', suffix='.json', delete=False, prefix='gsa_'
-    )
-    _tmp.write(_creds_json)
-    _tmp.flush()
-    _tmp.close()
-    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = _tmp.name
-    os.environ['GOOGLE_SERVICE_ACCOUNT_JSON'] = _creds_json
-else:
-    google_credentials = _resolve_runtime_path(raw_google_credentials)
-    if google_credentials:
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_credentials
-    elif (BASE_DIR / 'service-account.json').exists():
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str((BASE_DIR / 'service-account.json').resolve())
+google_service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+if not google_service_account_json:
+    raise EnvironmentError('GOOGLE_SERVICE_ACCOUNT_JSON environment variable must be set for Google authentication.')
+json.loads(google_service_account_json)  # Validate JSON
 
 
 # Quick-start development settings - unsuitable for production
