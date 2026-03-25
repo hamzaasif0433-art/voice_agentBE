@@ -372,20 +372,39 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         await self.accept()
 
-        # Debug: show what credentials Django sees at connect time
-        _creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-        _proj = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
-        _loc = os.getenv("GOOGLE_CLOUD_REGION", "europe-west4").strip()
-        print(
-            f"[WS Connect] CREDENTIALS='{_creds}' (exists={os.path.exists(_creds) if _creds else False}), "
-            f"project='{_proj}', location='{_loc}'",
-            flush=True,
+        # Use GOOGLE_SERVICE_ACCOUNT_JSON from environment for cloud compatibility
+        import json
+        from google.oauth2 import service_account
+        import vertexai
+
+        service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if not service_account_json:
+            raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.")
+        try:
+            sa_info = json.loads(service_account_json)
+        except json.JSONDecodeError as e:
+            raise ValueError("Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON environment variable.") from e
+
+        credentials = service_account.Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+
+        vertex_project = os.environ.get("VERTEX_PROJECT")
+        vertex_location = os.environ.get("VERTEX_LOCATION")
+        if not vertex_project or not vertex_location:
+            raise EnvironmentError("VERTEX_PROJECT and VERTEX_LOCATION environment variables must be set.")
+
+        vertexai.init(
+            project=vertex_project,
+            location=vertex_location,
+            credentials=credentials,
         )
 
         self.client = genai.Client(
             vertexai=True,
-            project=_proj,
-            location=_loc,
+            project=vertex_project,
+            location=vertex_location,
         )
         print("[WS Connect] Gemini client created OK", flush=True)
 
