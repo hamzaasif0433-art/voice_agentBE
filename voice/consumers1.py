@@ -12,13 +12,31 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from dotenv import load_dotenv
 from websockets.exceptions import ConnectionClosed
 
+# ---------------------------------------------------------------------------
+# Load .env FIRST — before any Google SDK code runs, so that
+# GOOGLE_APPLICATION_CREDENTIALS is available for service account auth.
+# ---------------------------------------------------------------------------
+_kfc_api_dir = Path(__file__).resolve().parent.parent  # voice/consumers1.py -> voice -> kfc_api
+_env_file = _kfc_api_dir / ".env"
+load_dotenv(str(_env_file), override=True)
+
+# Resolve GOOGLE_APPLICATION_CREDENTIALS to an absolute path if relative.
+# When Django runs from a different CWD, relative paths won't find the file.
+_creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+if _creds_path and not os.path.isabs(_creds_path):
+    _abs_creds = str(_kfc_api_dir / _creds_path)
+    if os.path.exists(_abs_creds):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _abs_creds
+        logging.getLogger(__name__).info(
+            "Resolved GOOGLE_APPLICATION_CREDENTIALS to: %s", _abs_creds
+        )
+# ---------------------------------------------------------------------------
+
 try:
     from google import genai
     from google.genai import types
 except ImportError:
     raise ImportError("pip install google-genai")
-
-load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +51,9 @@ OUT_RATE = 24000
 GREETING_PATH = Path("media/sara_greeting.wav")
 
 GREETING_PROMPT = (
-    "Greet the caller as Sara, a warm and friendly appointment booking assistant. "
-    "Say exactly this, naturally and warmly: "
-    "\"Assalam o Alaikum! Main Sara bol rahi hoon. "
-    "Aapki appointment booking mein aapki madad ke liye haazir hoon. "
-    "Batayein, main aapke liye kya kar sakti hoon?\""
+    "The system has already played a welcome greeting to the user. "
+    "Your very first action must be to call the get_schedule tool immediately and silently to fetch available days. "
+    "Do NOT speak any greeting or filler text before calling the tool."
 )
 
 # ---------------------------------------------------------------------------
@@ -73,18 +89,23 @@ NEVER guess or assume any date from memory.
 
 # Conversation Flow
 
-## Step 1 — Greet & Call get_schedule Immediately
-- Greet warmly as Sara, then immediately say the filler line and call get_schedule.
-- Filler (say this OUT LOUD before the tool runs):
-  "Ek lamha, main schedule check kar rahi hoon."
-- Call get_schedule tool (GET, no parameters).
+## Step 1 — Call get_schedule Immediately
+- The system has already greeted the user for you.
+- Do NOT say any filler lines. Do NOT speak.
+- Call get_schedule tool (GET, no parameters) IMMEDIATELY and silently.
 - From the response, read each day's is_active field:
   - is_active: true → day is OPEN
   - is_active: false → day is CLOSED — NEVER offer this day
 - Store open days, start_time, end_time, and slot_duration for each open day.
 - If tool fails, say: "Sorry, there is a system issue. Please call back later." Then end the call.
 
-## Step 2 — Collect Patient Details (One Question at a Time)
+## Step 2 — Natural Small Talk (IMPORTANT)
+After the schedule is fetched, before asking for the patient's name:
+- If the user says something casual like "alhumdullilah", "I'm fine", "theek hoon", "how are you", "shukriya" etc., respond WARMLY and BRIEFLY in Urdu first. Example: "Alhamdulillah, bahut shukriya! Main bhi theek hoon. Aao main aapki appointment schedule karney mein madad karti hoon."
+- Only THEN proceed to ask for the name.
+- Do NOT jump straight to asking the name if the user is engaged in small talk.
+
+## Step 3 — Collect Patient Details (One Question at a Time)
 Ask in this exact order, one per turn:
 1. "Aapka poora naam kya hai?"
 2. "Aapka phone number batayein please."
@@ -142,10 +163,10 @@ Once slot is selected, confirm all details:
 "Toh main confirm karna chahti hoon — [name] ke liye [date] ko [time] baje appointment book karoon? Kya yeh theek hai?"
 - Wait for explicit YES before proceeding.
 
-## Step 7 — Book the Appointment
-After patient's YES:
-- Filler (say OUT LOUD): "Ek lamha, main aapki appointment book kar rahi hoon."
-- Call book_appointment with:
+## Step 7 — Book the Appointment — **MANDATORY API CALL**
+After patient's YES, you MUST call the book_appointment tool. This is NON-NEGOTIABLE.
+- Filler (say OUT LOUD FIRST): "Ek lamha, main aapki appointment book kar rahi hoon."
+- IMMEDIATELY call book_appointment tool with ALL required fields:
   {{
     "name": "patient_name",
     "phone": "phone_number",
@@ -155,11 +176,12 @@ After patient's YES:
     "end_time": "HH:MM",
     "notes": "reason_for_visit"
   }}
-- end_time = start_time + slot_duration (from get_schedule response)
-- On success:
+- end_time = start_time + slot_duration minutes (from get_schedule response)
+- DO NOT say booking is done before calling the tool. ALWAYS call the tool first.
+- On success response:
   "Aapki appointment kamiyabi se book ho gayi hai! [date] ko [time] baje."
   If meet_link returned: "Aapke email par ek Google Meet link bhi bhej diya gaya hai."
-- On failure:
+- On failure response:
   "Sorry, system mein masla aa gaya. Kuch der baad dobara call karein."
 
 ## Step 8 — Warm Goodbye
@@ -167,6 +189,12 @@ After patient's YES:
 
 # Tool Call Order — NEVER SKIP OR REVERSE
 get_schedule → get_available_slots → book_appointment
+
+# CRITICAL: book_appointment is a REAL API CALL
+- After patient says YES to confirm their appointment, you MUST invoke the book_appointment TOOL.
+- Do NOT just say the booking is confirmed without actually calling the tool.
+- The tool sends data to the backend. Without calling it, no appointment is saved.
+- If you skip this tool call, the appointment will NOT be booked.
 
 # Guardrails
 - Do NOT give medical advice or diagnose anything.
@@ -179,6 +207,7 @@ get_schedule → get_available_slots → book_appointment
 - Do NOT pass incomplete email (without @) to book_appointment.
 - Always protect patient confidentiality.
 - Never say you are an AI.
+- ALWAYS call book_appointment tool after YES — never skip it.
 
 # Tone
 - Warm, polite, and concise.
@@ -286,23 +315,29 @@ async def execute_tool(tool_name: str, tool_args: dict) -> dict:
     try:
         async with aiohttp.ClientSession() as http:
 
+            # Hit the local Django server directly to bypass Dev Tunnel blocking/latency
+            base = "http://127.0.0.1:8000"
+            
             if tool_name == "get_schedule":
-                async with http.get(f"{BASE_URL}/appointment/schedule/") as resp:
+                async with http.get(f"{base}/appointment/schedule/") as resp:
+                    resp.raise_for_status()
                     return await resp.json()
 
             elif tool_name == "get_available_slots":
                 date = tool_args.get("date", "")
                 async with http.get(
-                    f"{BASE_URL}/appointment/slots/",
+                    f"{base}/appointment/slots/",
                     params={"date": date}
                 ) as resp:
+                    resp.raise_for_status()
                     return await resp.json()
 
             elif tool_name == "book_appointment":
                 async with http.post(
-                    f"{BASE_URL}/appointment/create/",
+                    f"{base}/appointment/create/",
                     json=tool_args,
                 ) as resp:
+                    resp.raise_for_status()
                     return await resp.json()
 
             else:
@@ -336,13 +371,23 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
         await self.accept()
-        logger.info("SIP WebSocket connected — starting Gemini Live session")
+
+        # Debug: show what credentials Django sees at connect time
+        _creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+        _proj = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        _loc = os.getenv("GOOGLE_CLOUD_REGION", "europe-west4").strip()
+        print(
+            f"[WS Connect] CREDENTIALS='{_creds}' (exists={os.path.exists(_creds) if _creds else False}), "
+            f"project='{_proj}', location='{_loc}'",
+            flush=True,
+        )
 
         self.client = genai.Client(
             vertexai=True,
-            project=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
-            location=os.getenv("GOOGLE_CLOUD_REGION", "europe-west4"),
+            project=_proj,
+            location=_loc,
         )
+        print("[WS Connect] Gemini client created OK", flush=True)
 
         task = asyncio.create_task(self._run_gemini_session())
         self._tasks.append(task)
@@ -374,9 +419,22 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             logger.info("Gemini session closed while forwarding audio: %s", exc)
             self._clear_session_state()
 
+    async def disconnect(self, close_code):
+        print(f"[WS] Browser connection closed (code {close_code}), cancelling {len(self._tasks)} tasks...", flush=True)
+        self._disconnecting = True
+        self._clear_session_state()
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        self._tasks.clear()
+
     def _clear_session_state(self):
         self.gemini_session = None
         self._session_ready.clear()
+
+    async def _on_gemini_ready(self):
+        """Hook for subclasses to run after Gemini session opens. Default: no-op."""
+        pass
 
     # ------------------------------------------------------------------
     # Gemini Live session
@@ -394,7 +452,8 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=VOICE_NAME
                     )
-                )
+                ),
+                language_code='en-US'
             ),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
@@ -411,14 +470,21 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             ) as session:
                 self.gemini_session = session
                 self._session_ready.set()
-                logger.info("Gemini Live session open")
+                print("[WS] Gemini Live session open successfully!", flush=True)
+
+                # Notify subclass (e.g. BrowserVoiceConsumer sends session_ready JSON)
+                await self._on_gemini_ready()
 
                 await self._handle_greeting(session)
                 await self._receive_loop(session)
 
                 if not self._disconnecting:
-                    logger.info("Gemini Live session ended — closing WebSocket")
+                    print("[WS INFO] Gemini Live session receive loop ended cleanly — closing WebSocket", flush=True)
                     await self.close()
+        except Exception as e:
+            print(f">>> [WS ERROR] Failed to connect to Gemini Live: {type(e).__name__}: {str(e)}", flush=True)
+            self._clear_session_state()
+            await self.close()
 
         except asyncio.CancelledError:
             logger.info("Gemini session task cancelled (call ended)")
@@ -433,11 +499,23 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
     async def _handle_greeting(self, session):
         if GREETING_PATH.exists():
-            logger.info("Playing cached greeting from sara_greeting.wav")
+            print(f"[WS] Playing cached greeting from {GREETING_PATH}", flush=True)
             pcm_data = _load_wav_pcm(GREETING_PATH)
             await self._stream_pcm_to_sip(pcm_data)
+            
+            # Important: Tell the model to start natively
+            print("[WS] Telling model that greeting is cached and to start", flush=True)
+            await session.send_client_content(
+                turns=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text=GREETING_PROMPT)],
+                    )
+                ],
+                turn_complete=True,
+            )
         else:
-            logger.info("No greeting file — asking Gemini to generate one")
+            print("[WS] No greeting file — asking Gemini to generate one", flush=True)
             self._save_as_greeting = True
             await session.send_client_content(
                 turns=[
@@ -448,6 +526,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 ],
                 turn_complete=True,
             )
+        print("[WS] _handle_greeting completed", flush=True)
 
     async def _stream_pcm_to_sip(self, pcm_24k: bytes):
         sip_audio = _pcm_to_mulaw(pcm_24k)
@@ -464,57 +543,74 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         greeting_buffer = bytearray()
 
         try:
-            async for response in session.receive():
+            while not self._disconnecting:
+                async for response in session.receive():
+                    sc = getattr(response, "server_content", None)
+                    tc = getattr(response, "tool_call", None)
+                    print(f"[WS] Recv event: server_content={bool(sc)}, tool_call={bool(tc)}", flush=True)
 
-                # ── Tool call handling ──────────────────────────────────
-                tool_call = getattr(response, "tool_call", None)
-                if tool_call:
-                    for fc in tool_call.function_calls:
-                        tool_name = fc.name
-                        tool_args = dict(fc.args) if fc.args else {}
-                        logger.info(f"[Tool Call] {tool_name}({tool_args})")
+                    if sc:
+                        print(f"[WS DEBUG] turn_complete={getattr(sc, 'turn_complete', False)}, interrupted={getattr(sc, 'interrupted', False)}", flush=True)
+                        if getattr(sc, "model_turn", None):
+                            for p in sc.model_turn.parts:
+                                if getattr(p, "text", None):
+                                    print(f"[WS DEBUG] Model Text: {p.text}", flush=True)
+                    
+                    tool_call = getattr(response, "tool_call", None)
+                    if tool_call:
+                        function_responses = []
+                        for fc in tool_call.function_calls:
+                            tool_name = fc.name
+                            tool_args = dict(fc.args) if fc.args else {}
+                            print(f"[WS] [Tool Call] {tool_name}({tool_args})", flush=True)
 
-                        result = await execute_tool(tool_name, tool_args)
-                        logger.info(f"[Tool Result] {tool_name} → {result}")
+                            result = await execute_tool(tool_name, tool_args)
+                            print(f"[WS] [Tool Result] {tool_name} → {result}", flush=True)
 
-                        # Send result back to Gemini
-                        await session.send_tool_response(
-                            function_responses=[
+                            function_responses.append(
                                 types.FunctionResponse(
                                     name=tool_name,
                                     id=fc.id,
                                     response={"result": result},
                                 )
-                            ]
-                        )
-                    continue
+                            )
+                        
+                        try:
+                            # Send result back to Gemini
+                            await session.send_tool_response(
+                                function_responses=function_responses
+                            )
+                            print(f"[WS] Successfully sent tool responses for {len(function_responses)} calls", flush=True)
+                        except Exception as e:
+                            print(f">>> [WS ERROR] Failed to send tool response to Gemini: {repr(e)}", flush=True)
+                        continue
 
-                # ── Audio + transcription handling ──────────────────────
-                sc = getattr(response, "server_content", None)
-                if sc is None:
-                    continue
+                    # ── Audio + transcription handling ──────────────────────
+                    sc = getattr(response, "server_content", None)
+                    if sc is None:
+                        continue
 
-                if getattr(sc, "input_transcription", None):
-                    t = sc.input_transcription
-                    if hasattr(t, "text") and t.text:
-                        logger.info(f"[User] {t.text}")
+                    if getattr(sc, "input_transcription", None):
+                        t = sc.input_transcription
+                        if hasattr(t, "text") and t.text:
+                            print(f"[WS] [User] {t.text}", flush=True)
 
-                if getattr(sc, "model_turn", None):
-                    for part in sc.model_turn.parts:
-                        inline = getattr(part, "inline_data", None)
-                        if inline and inline.data:
-                            if self._save_as_greeting:
-                                greeting_buffer.extend(inline.data)
+                    if getattr(sc, "model_turn", None):
+                        for part in sc.model_turn.parts:
+                            inline = getattr(part, "inline_data", None)
+                            if inline and inline.data:
+                                if self._save_as_greeting:
+                                    greeting_buffer.extend(inline.data)
 
-                            sip_audio = _pcm_to_mulaw(inline.data)
-                            await self.send(bytes_data=sip_audio)
+                                sip_audio = _pcm_to_mulaw(inline.data)
+                                await self.send(bytes_data=sip_audio)
 
-                if getattr(sc, "turn_complete", False):
-                    if self._save_as_greeting and greeting_buffer:
-                        _save_wav(bytes(greeting_buffer), GREETING_PATH, OUT_RATE)
-                        logger.info(f"Greeting saved to {GREETING_PATH}")
-                        self._save_as_greeting = False
-                        greeting_buffer.clear()
+                    if getattr(sc, "turn_complete", False):
+                        if self._save_as_greeting and greeting_buffer:
+                            _save_wav(bytes(greeting_buffer), GREETING_PATH, OUT_RATE)
+                            logger.info(f"Greeting saved to {GREETING_PATH}")
+                            self._save_as_greeting = False
+                            greeting_buffer.clear()
 
         except ConnectionClosed as exc:
             logger.info(
