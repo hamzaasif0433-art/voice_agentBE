@@ -1,6 +1,7 @@
 # voice_agent/consumers.py
 import asyncio
 import audioop
+import json
 import logging
 import os
 import wave
@@ -9,41 +10,49 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from channels.generic.websocket import AsyncWebsocketConsumer
-from dotenv import load_dotenv
 from websockets.exceptions import ConnectionClosed
-
-# ---------------------------------------------------------------------------
-
-# Load .env FIRST — before any Google SDK code runs
-_kfc_api_dir = Path(__file__).resolve().parent.parent  # voice/consumers1.py -> voice -> kfc_api
-_env_file = _kfc_api_dir / ".env"
-load_dotenv(str(_env_file), override=True)
-
-# Vertex AI credentials setup (cloud compatible, no file path logic)
-import json
 from google.oauth2 import service_account
 import vertexai
 
-service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-if not service_account_json:
+# ---------------------------------------------------------------------------
+# Load service account credentials from environment variable
+# Railway double-escapes \n in the private_key — fix it before parsing
+# ---------------------------------------------------------------------------
+_raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+if not _raw_json:
     raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.")
-try:
-    sa_info = json.loads(service_account_json)
-except json.JSONDecodeError as e:
-    raise ValueError("Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON environment variable.") from e
 
-credentials = service_account.Credentials.from_service_account_info(
-    sa_info,
+try:
+    _sa_info = json.loads(_raw_json)
+except json.JSONDecodeError as e:
+    raise ValueError(f"Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e}") from e
+
+# Fix Railway's double-escaped newlines in private_key
+_sa_info["private_key"] = _sa_info["private_key"].replace("\\n", "\n")
+
+_credentials = service_account.Credentials.from_service_account_info(
+    _sa_info,
     scopes=["https://www.googleapis.com/auth/cloud-platform"],
 )
 
-vertex_project = os.environ.get("VERTEX_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
-vertex_location = os.environ.get("VERTEX_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", "europe-west4")
+_PROJECT  = os.environ.get("VERTEX_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+_LOCATION = os.environ.get("VERTEX_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", "europe-west4")
+
+if not _PROJECT:
+    raise EnvironmentError("VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT environment variable must be set.")
+
+# Initialize Vertex AI globally with explicit credentials — bypasses ADC entirely
 vertexai.init(
-    project=vertex_project,
-    location=vertex_location,
-    credentials=credentials,
+    project=_PROJECT,
+    location=_LOCATION,
+    credentials=_credentials,
 )
+
+# Kill any stale file-based credential env vars so SDK never falls back to them
+os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+os.environ.pop("GOOGLE_SERVICE_ACCOUNT_FILE", None)
+
+# ---------------------------------------------------------------------------
 
 try:
     from google import genai
@@ -70,7 +79,7 @@ GREETING_PROMPT = (
 )
 
 # ---------------------------------------------------------------------------
-# System prompt — English, Sara persona
+# System prompt — Sara persona
 # ---------------------------------------------------------------------------
 
 def _build_system_prompt() -> str:
@@ -327,10 +336,8 @@ async def execute_tool(tool_name: str, tool_args: dict) -> dict:
 
     try:
         async with aiohttp.ClientSession() as http:
-
-            # Hit the local Django server directly to bypass Dev Tunnel blocking/latency
             base = "http://127.0.0.1:8000"
-            
+
             if tool_name == "get_schedule":
                 async with http.get(f"{base}/appointment/schedule/") as resp:
                     resp.raise_for_status()
@@ -385,39 +392,18 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         await self.accept()
 
-        # Use GOOGLE_SERVICE_ACCOUNT_JSON from environment for cloud compatibility
-        import json
-        from google.oauth2 import service_account
-        import vertexai
-
-        service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-        if not service_account_json:
-            raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.")
-        try:
-            sa_info = json.loads(service_account_json)
-        except json.JSONDecodeError as e:
-            raise ValueError("Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON environment variable.") from e
-
-        credentials = service_account.Credentials.from_service_account_info(
-            sa_info,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        print(
+            f"[WS Connect] SA email='{_sa_info.get('client_email')}', "
+            f"project='{_PROJECT}', location='{_LOCATION}'",
+            flush=True,
         )
 
-        vertex_project = os.environ.get("VERTEX_PROJECT")
-        vertex_location = os.environ.get("VERTEX_LOCATION")
-        if not vertex_project or not vertex_location:
-            raise EnvironmentError("VERTEX_PROJECT and VERTEX_LOCATION environment variables must be set.")
-
-        vertexai.init(
-            project=vertex_project,
-            location=vertex_location,
-            credentials=credentials,
-        )
-
+        # credentials and vertexai.init() already done at module level
         self.client = genai.Client(
             vertexai=True,
-            project=vertex_project,
-            location=vertex_location,
+            project=_PROJECT,
+            location=_LOCATION,
+            credentials=_credentials,
         )
         print("[WS Connect] Gemini client created OK", flush=True)
 
@@ -473,12 +459,10 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     # ------------------------------------------------------------------
 
     def _get_system_prompt(self) -> str:
-        """Return the system prompt string for this session."""
         from .agents.healthcare import build_system_prompt
         return build_system_prompt()
 
     def _get_tools(self):
-        """Return the Gemini TOOLS list for this session."""
         from .agents.healthcare import TOOLS
         return TOOLS
 
@@ -497,7 +481,6 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         return GREETING_PROMPT
 
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> dict:
-        """Execute a tool call. Subclasses override for per-agent routing."""
         from .agents.healthcare import execute_tool
         return await execute_tool(tool_name, tool_args)
 
@@ -542,24 +525,20 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 self._session_ready.set()
                 print("[WS] Gemini Live session open successfully!", flush=True)
 
-                # Notify subclass (e.g. BrowserVoiceConsumer sends session_ready JSON)
                 await self._on_gemini_ready()
-
                 await self._handle_greeting(session)
                 await self._receive_loop(session)
 
                 if not self._disconnecting:
                     print("[WS INFO] Gemini Live session receive loop ended cleanly — closing WebSocket", flush=True)
                     await self.close()
-        except Exception as e:
-            print(f">>> [WS ERROR] Failed to connect to Gemini Live: {type(e).__name__}: {str(e)}", flush=True)
-            self._clear_session_state()
-            await self.close()
 
         except asyncio.CancelledError:
             logger.info("Gemini session task cancelled (call ended)")
         except Exception as e:
-            logger.error(f"Gemini session error: {e}")
+            print(f">>> [WS ERROR] Failed to connect to Gemini Live: {type(e).__name__}: {str(e)}", flush=True)
+            self._clear_session_state()
+            await self.close()
         finally:
             self._clear_session_state()
 
@@ -568,14 +547,13 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     # ------------------------------------------------------------------
 
     async def _handle_greeting(self, session):
-        greeting_path  = self._get_greeting_path()
+        greeting_path   = self._get_greeting_path()
         greeting_prompt = self._get_greeting_prompt()
 
         if greeting_path.exists():
             print(f"[WS] Playing cached greeting from {greeting_path}", flush=True)
             pcm_data = _load_wav_pcm(greeting_path)
             await self._stream_pcm_to_sip(pcm_data)
-
             print("[WS] Telling model that greeting is cached and to start", flush=True)
             await session.send_client_content(
                 turns=[
@@ -627,7 +605,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             for p in sc.model_turn.parts:
                                 if getattr(p, "text", None):
                                     print(f"[WS DEBUG] Model Text: {p.text}", flush=True)
-                    
+
                     tool_call = getattr(response, "tool_call", None)
                     if tool_call:
                         function_responses = []
@@ -646,9 +624,8 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                                     response={"result": result},
                                 )
                             )
-                        
+
                         try:
-                            # Send result back to Gemini
                             await session.send_tool_response(
                                 function_responses=function_responses
                             )
@@ -657,7 +634,6 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             print(f">>> [WS ERROR] Failed to send tool response to Gemini: {repr(e)}", flush=True)
                         continue
 
-                    # ── Audio + transcription handling ──────────────────────
                     sc = getattr(response, "server_content", None)
                     if sc is None:
                         continue
@@ -673,7 +649,6 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             if inline and inline.data:
                                 if self._save_as_greeting:
                                     greeting_buffer.extend(inline.data)
-
                                 sip_audio = _pcm_to_mulaw(inline.data)
                                 await self.send(bytes_data=sip_audio)
 
