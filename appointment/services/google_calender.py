@@ -9,43 +9,29 @@ import json
 from pathlib import Path
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-# Resolve credentials from environment first, then fallback to local files.
-_THIS_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _THIS_DIR.parent.parent
-_env_creds = os.getenv('GOOGLE_APPLICATION_CREDENTIALS') or os.getenv('GOOGLE_SERVICE_ACCOUNT_FILE')
-
-if _env_creds:
-    _creds_path = Path(os.path.expandvars(_env_creds)).expanduser()
-    SERVICE_ACCOUNT_FILE = str(_creds_path if _creds_path.is_absolute() else (_PROJECT_ROOT / _creds_path).resolve())
-else:
-    local_creds = _THIS_DIR / 'credentials.json'
-    root_creds = _PROJECT_ROOT / 'service-account.json'
-    SERVICE_ACCOUNT_FILE = str(local_creds if local_creds.exists() else root_creds)
-
 CALENDAR_ID = 'alihassan9682@gmail.com'
 TIMEZONE = 'Asia/Karachi'
 
 
 def get_calendar_service():
-    """Build and return Google Calendar service"""
-    credentials_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+    """Build and return Google Calendar service using GOOGLE_SERVICE_ACCOUNT_JSON"""
+    _raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not _raw_json:
+        raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.")
 
-    # Backward compatibility: accept JSON directly in GOOGLE_APPLICATION_CREDENTIALS.
-    if not credentials_json:
-        raw_gac = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '').strip()
-        if raw_gac.startswith('{'):
-            credentials_json = raw_gac
+    try:
+        _sa_info = json.loads(_raw_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e}") from e
 
-    if credentials_json:
-        creds = service_account.Credentials.from_service_account_info(
-            json.loads(credentials_json),
-            scopes=SCOPES
-        )
-    else:
-        creds = service_account.Credentials.from_service_account_file(
-            SERVICE_ACCOUNT_FILE,
-            scopes=SCOPES
-        )
+    # Fix Railway's double-escaped newlines in private_key
+    if "private_key" in _sa_info:
+        _sa_info["private_key"] = _sa_info["private_key"].replace("\\n", "\n")
+
+    creds = service_account.Credentials.from_service_account_info(
+        _sa_info,
+        scopes=SCOPES
+    )
 
     return build('calendar', 'v3', credentials=creds)
 

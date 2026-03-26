@@ -83,8 +83,8 @@ EMAIL_BACKEND    = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST       = 'smtp.gmail.com'
 EMAIL_PORT       = 587
 EMAIL_USE_TLS    = True
-EMAIL_HOST_USER  = 'hamzaasif0433@gmail.com'
-EMAIL_HOST_PASSWORD = 'fjmo ksky fvhy rvsr'  # Gmail App Password
+EMAIL_HOST_USER  = 'alihassan9682@gmail.com'
+EMAIL_HOST_PASSWORD = 'fctj lcfy qnjz fuen'  # Gmail App Password
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
