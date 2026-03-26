@@ -43,11 +43,10 @@ GREETING_PROMPT_EN = (
 # Used when NO cached greeting exists — model must greet the customer
 GENERATE_GREETING_PROMPT = (
     "This is the very start of the conversation. No greeting has been played yet. "
-    "You MUST speak a warm greeting to the customer RIGHT NOW before doing ANYTHING else. "
-    "Do NOT call any tools yet. Do NOT say any filler lines. "
-    "Just greet the customer warmly in Urdu, for example: "
-    "'السلام علیکم! ہماری ریسٹورنٹ میں خوش آمدید! آپ کیا آرڈر کرنا چاہیں گے؟' "
-    "Keep the greeting short and warm. Then wait for the customer to speak."
+    "You MUST speak a warm greeting in Urdu RIGHT NOW. "
+    "Introduce yourself as the BlenSpark Restaurant ordering assistant. "
+    "Example: 'السلام علیکم! بلین سپارک ریسٹورنٹ میں خوش آمدید! میں آپ کا آرڈر لینے والا اسسٹنٹ ہوں۔ میں آپ کی کیا مدد کر سکتا ہوں؟' "
+    "Keep the greeting short and professional. Then wait for the customer to speak."
 )
 
 GENERATE_GREETING_PROMPT_EN = (

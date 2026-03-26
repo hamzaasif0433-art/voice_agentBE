@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-CALENDAR_ID = 'alihassan9682@gmail.com'
+CALENDAR_ID = os.getenv('GOOGLE_CALENDAR_ID', 'alihassan9682@gmail.com')
 TIMEZONE = 'Asia/Karachi'
 
 
@@ -32,8 +32,7 @@ def get_calendar_service():
         _sa_info,
         scopes=SCOPES
     )
-
-    return build('calendar', 'v3', credentials=creds)
+    return build('calendar', 'v3', credentials=creds, cache_discovery=False)
 
 
 def create_meeting(appointment):

@@ -78,25 +78,19 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
     # Urdu — gender-aware
     if is_female:
         name = "سارہ"
-        haazir = "حاضر ہوں"
-        madad = "مدد کرتی"
     else:
         name = "علی"
-        haazir = "حاضر ہوں"
-        madad = "مدد کرتا"
 
     return (
         "This is the very start of the conversation. No greeting has been played yet. "
-        f"You are {name}. YOU are initiating this call, so YOU must greet first. "
-        "You MUST speak a warm greeting to the user RIGHT NOW before doing ANYTHING else. "
-        "Do NOT call any tools yet. Do NOT say any filler lines. "
-        "CRITICAL: You are the CALLER — you must START with 'السلام علیکم' (Assalam-o-Alaikum). "
-        "NEVER say 'وعلیکم السلام' — that is a REPLY, and nobody has greeted you yet. "
-        "Greet the user warmly in pure Urdu script. Example: "
-        f"'السلام علیکم! میں {name} ہوں، آپ کی {madad} کے لیے حاضر ہوں۔ آپ کیسے ہیں؟' "
-        "Keep the greeting short and warm. After you finish greeting, "
-        "the user will respond and then you can proceed normally."
+        "You MUST speak a warm greeting in Urdu RIGHT NOW. "
+        "Use this EXACT phrase but in Urdu script: "
+        f"'Assalam-o-alaikum! My name is {name}, and I am your appointment booking assistant. How may I help you today?' "
+        "Urdu Script: "
+        f"'السلام علیکم! میرا نام {name} ہے، میں آپ کی اپوائنٹمنٹ بُک کرنے میں مدد کروں گا۔ میں آپ کی کیسے مدد کر سکتا ہوں؟' "
+        "Do NOT call any tools yet. Just speak this greeting and wait for the patient to respond."
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -555,13 +549,17 @@ async def execute_tool(tool_name: str, tool_args: dict) -> dict:
         async with aiohttp.ClientSession() as http:
             if tool_name == "get_schedule":
                 async with http.get(f"{base}/appointment/schedule/") as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
+                    body = await resp.json()
+                    if resp.status >= 400:
+                        return {"error": True, "status": resp.status, "details": body}
+                    return body
 
             elif tool_name == "get_available_slots":
                 async with http.get(f"{base}/appointment/slots/", params={"date": tool_args.get("date", "")}) as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
+                    body = await resp.json()
+                    if resp.status >= 400:
+                        return {"error": True, "status": resp.status, "details": body}
+                    return body
 
             elif tool_name == "book_appointment":
                 async with http.post(f"{base}/appointment/create/", json=tool_args) as resp:

@@ -128,23 +128,35 @@ class AppointmentCreateView(APIView):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # If slot is available, proceed with booking
-            appointment = serializer.save()  # save to DB first
+            appointment = serializer.save()
 
-            try:
-                calendar_data = create_meeting(appointment)
-                appointment.google_event_id = calendar_data['event_id']
-                appointment.meet_link        = calendar_data['meet_link']
-                appointment.calendar_link    = calendar_data['calendar_link']
-                appointment.save()
-            except Exception as e:
-                # Don't fail the booking if calendar fails
-                print(f"Calendar error: {e}")
+            # Offload slow IO (Calendar + Email) to a background thread to prevent agent stalling
+            import threading
+            def process_background_tasks(appt_id):
+                try:
+                    from .models import Appointment
+                    # Re-fetch instance to ensure thread-safety
+                    appt = Appointment.objects.get(id=appt_id)
+                    
+                    # 1. Create Google Calendar Meeting
+                    try:
+                        calendar_data = create_meeting(appt)
+                        appt.google_event_id = calendar_data['event_id']
+                        appt.meet_link        = calendar_data['meet_link']
+                        appt.calendar_link    = calendar_data['calendar_link']
+                        appt.save()
+                    except Exception as ce:
+                        print(f"Background Calendar error: {ce}")
 
-            try:
-                send_appointment_email(appointment)
-            except Exception as e:
-                # Don't fail the booking if email fails
-                print(f"Email error: {e}")
+                    # 2. Send Confirmation Email
+                    try:
+                        send_appointment_email(appt)
+                    except Exception as ee:
+                        print(f"Background Email error: {ee}")
+                except Exception as e:
+                    print(f"Background Task Management error: {e}")
+
+            threading.Thread(target=process_background_tasks, args=(appointment.id,), daemon=True).start()
 
             return Response(AppointmentSerializer(appointment).data,
                             status=status.HTTP_201_CREATED)
