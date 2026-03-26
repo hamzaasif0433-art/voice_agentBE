@@ -92,8 +92,12 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
     # Override: expose dynamic config to parent _run_gemini_session
     # ------------------------------------------------------------------
 
-    def _get_system_prompt(self) -> str:
-        return self._agent_cfg["build_system_prompt"](language=self._language)
+    def _get_system_prompt(self, has_cached_greeting: bool = False) -> str:
+        return self._agent_cfg["build_system_prompt"](
+            language=self._language,
+            voice=self._voice,
+            has_cached_greeting=has_cached_greeting
+        )
 
     def _get_tools(self):
         return self._agent_cfg["tools_fn"]()
@@ -105,10 +109,26 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         return self._language
 
     def _get_greeting_path(self) -> Path:
+        # Use language+voice-aware greeting path if available
+        fn = self._agent_cfg.get("greeting_path_fn")
+        if fn:
+            return fn(self._language, self._voice)
         return self._agent_cfg["greeting_path"]
 
     def _get_greeting_prompt(self) -> str:
+        # Use language-aware greeting prompt if available
+        fn = self._agent_cfg.get("greeting_prompt_fn")
+        if fn:
+            return fn(self._language)
         return self._agent_cfg["greeting_prompt"]
+
+    def _get_generate_greeting_prompt(self) -> str:
+        """Prompt used when NO cached greeting exists — model must greet the user."""
+        fn = self._agent_cfg.get("generate_greeting_prompt_fn")
+        if fn:
+            return fn(self._language, self._voice)
+        # Fallback: use the regular greeting prompt (backward compat)
+        return self._get_greeting_prompt()
 
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> dict:
         """Delegate tool execution to the active agent's executor."""
@@ -241,6 +261,11 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                                 if self._save_as_greeting:
                                     greeting_buffer.extend(inline.data)
                                 await self.send(bytes_data=inline.data)
+
+                    if getattr(sc, "interrupted", False):
+                        import json
+                        print("[BrowserWS] Gemini interrupted — sending clear queue command", flush=True)
+                        await self.send(text_data=json.dumps({"event": "clear"}))
 
                     if getattr(sc, "turn_complete", False):
                         if self._save_as_greeting and greeting_buffer:

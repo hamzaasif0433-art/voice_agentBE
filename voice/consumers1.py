@@ -459,9 +459,9 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     # Override hooks — subclasses implement these for dynamic config
     # ------------------------------------------------------------------
 
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, has_cached_greeting: bool = False) -> str:
         from .agents.healthcare import build_system_prompt
-        return build_system_prompt()
+        return build_system_prompt(has_cached_greeting=has_cached_greeting)
 
     def _get_tools(self):
         from .agents.healthcare import TOOLS
@@ -481,6 +481,10 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         from .agents.healthcare import GREETING_PROMPT
         return GREETING_PROMPT
 
+    def _get_generate_greeting_prompt(self) -> str:
+        from .agents.healthcare import GENERATE_GREETING_PROMPT
+        return GENERATE_GREETING_PROMPT
+
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> dict:
         from .agents.healthcare import execute_tool
         return await execute_tool(tool_name, tool_args)
@@ -492,7 +496,11 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     async def _run_gemini_session(self):
         voice_name    = self._get_voice_name()
         language_code = self._get_language_code()
-        system_prompt = self._get_system_prompt()
+        
+        greeting_path = self._get_greeting_path()
+        has_cached_greeting = greeting_path.exists()
+        
+        system_prompt = self._get_system_prompt(has_cached_greeting=has_cached_greeting)
         tools         = self._get_tools()
 
         live_config = types.LiveConnectConfig(
@@ -552,27 +560,24 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         greeting_prompt = self._get_greeting_prompt()
 
         if greeting_path.exists():
+            # Cached greeting exists — play it to the SIP or Browser
             print(f"[WS] Playing cached greeting from {greeting_path}", flush=True)
             pcm_data = _load_wav_pcm(greeting_path)
             await self._stream_pcm_to_sip(pcm_data)
-            print("[WS] Telling model that greeting is cached and to start", flush=True)
-            await session.send_client_content(
-                turns=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part(text=greeting_prompt)],
-                    )
-                ],
-                turn_complete=True,
-            )
+            print("[WS] Finished playing cached greeting. Model will wait in silence.", flush=True)
+            # We explicitly do NOT send a user text message here, because doing so
+            # forces Gemini Live to generate a verbal text/audio response immediately.
+            # The context is now provided via system_instruction!
         else:
-            print("[WS] No greeting file — asking Gemini to generate one", flush=True)
+            # No cached greeting — ask model to greet the user warmly
+            generate_prompt = self._get_generate_greeting_prompt()
+            print("[WS] No greeting file — asking Gemini to generate greeting", flush=True)
             self._save_as_greeting = True
             await session.send_client_content(
                 turns=[
                     types.Content(
                         role="user",
-                        parts=[types.Part(text=greeting_prompt)],
+                        parts=[types.Part(text=generate_prompt)],
                     )
                 ],
                 turn_complete=True,
@@ -655,8 +660,9 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
                     if getattr(sc, "turn_complete", False):
                         if self._save_as_greeting and greeting_buffer:
-                            _save_wav(bytes(greeting_buffer), GREETING_PATH, OUT_RATE)
-                            logger.info(f"Greeting saved to {GREETING_PATH}")
+                            save_path = self._get_greeting_path()
+                            _save_wav(bytes(greeting_buffer), save_path, OUT_RATE)
+                            logger.info(f"Greeting saved to {save_path}")
                             self._save_as_greeting = False
                             greeting_buffer.clear()
 

@@ -22,7 +22,7 @@ else:
     root_creds = _PROJECT_ROOT / 'service-account.json'
     SERVICE_ACCOUNT_FILE = str(local_creds if local_creds.exists() else root_creds)
 
-CALENDAR_ID = os.getenv('GOOGLE_CALENDAR_ID', 'hamza.asif0087@gmail.com')  # or 'primary'
+CALENDAR_ID = 'alihassan9682@gmail.com'
 TIMEZONE = 'Asia/Karachi'
 
 

@@ -69,6 +69,24 @@ def schedule(request):
 class AppointmentCreateView(APIView):
 
     def post(self, request):
+        # 0. Idempotency Check: Handle Gemini issuing duplicate tool calls on timeout
+        date_str = request.data.get('date')
+        start_time_str = request.data.get('start_time')
+        phone = request.data.get('phone')
+
+        if date_str and start_time_str and phone:
+            existing = Appointment.objects.filter(
+                date=date_str,
+                start_time=start_time_str,
+                phone=phone
+            ).first()
+            if existing:
+                # Return 200 OK with the already created appointment
+                return Response(
+                    AppointmentSerializer(existing).data,
+                    status=status.HTTP_200_OK
+                )
+
         serializer = AppointmentSerializer(data=request.data)
 
         if serializer.is_valid():
