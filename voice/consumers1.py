@@ -13,6 +13,10 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from websockets.exceptions import ConnectionClosed
 from google.oauth2 import service_account
 import vertexai
+import uuid
+import time
+from asgiref.sync import sync_to_async
+from Analytics.models import GeminiSessionCost, CallHistory
 
 # ---------------------------------------------------------------------------
 # Load service account credentials from environment variable
@@ -35,9 +39,8 @@ _credentials = service_account.Credentials.from_service_account_info(
     scopes=["https://www.googleapis.com/auth/cloud-platform"],
 )
 
-_PROJECT  = os.environ.get("VERTEX_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-_LOCATION = os.environ.get("VERTEX_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", "europe-west4")
-
+_PROJECT  = os.environ.get("VERTEX_PROJECT") 
+_LOCATION = os.environ.get("VERTEX_LOCATION") 
 if not _PROJECT:
     raise EnvironmentError("VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT environment variable must be set.")
 
@@ -385,12 +388,19 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._save_as_greeting = False
         self._upsample_state   = None
         self._downsample_state = None
+        self._session_uuid     = str(uuid.uuid4())
+        self._usage_metrics    = {"prompt": 0, "response": 0, "total": 0}
+        self._start_time       = None
+        self._call_history     = []
+        self._current_agent_turn = ""
+        self._should_end_call  = False
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self):
+        self._start_time = time.time()
         await self.accept()
 
         print(
@@ -549,6 +559,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             self._clear_session_state()
             await self.close()
         finally:
+            await self._save_session_cost()
             self._clear_session_state()
 
     # ------------------------------------------------------------------
@@ -603,6 +614,13 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 async for response in session.receive():
                     sc = getattr(response, "server_content", None)
                     tc = getattr(response, "tool_call", None)
+                    
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage:
+                        self._usage_metrics["prompt"] = max(self._usage_metrics["prompt"], getattr(usage, "prompt_token_count", 0) or 0)
+                        self._usage_metrics["response"] = max(self._usage_metrics["response"], getattr(usage, "response_token_count", 0) or 0)
+                        self._usage_metrics["total"] = max(self._usage_metrics["total"], getattr(usage, "total_token_count", 0) or 0)
+
                     print(f"[WS] Recv event: server_content={bool(sc)}, tool_call={bool(tc)}", flush=True)
 
                     if sc:
@@ -648,9 +666,13 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                         t = sc.input_transcription
                         if hasattr(t, "text") and t.text:
                             print(f"[WS] [User] {t.text}", flush=True)
+                            self._call_history.append({"role": "user", "text": t.text})
 
                     if getattr(sc, "model_turn", None):
                         for part in sc.model_turn.parts:
+                            if getattr(part, "text", None):
+                                self._current_agent_turn += part.text
+
                             inline = getattr(part, "inline_data", None)
                             if inline and inline.data:
                                 if self._save_as_greeting:
@@ -665,6 +687,17 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             logger.info(f"Greeting saved to {save_path}")
                             self._save_as_greeting = False
                             greeting_buffer.clear()
+                            
+                        if self._current_agent_turn:
+                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
+                            idx = self._current_agent_turn.lower()
+                            if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
+                                print("[WS] Detected call end greeting (Allah Hafiz) — scheduling disconnect.", flush=True)
+                                self._should_end_call = True
+                            self._current_agent_turn = ""
+                            
+                        if self._should_end_call:
+                            asyncio.create_task(self._delayed_close(6.0))
 
         except ConnectionClosed as exc:
             logger.info(
@@ -672,6 +705,53 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 getattr(exc, "code", None),
                 getattr(exc, "reason", ""),
             )
+
+    async def _delayed_close(self, delay: float):
+        await asyncio.sleep(delay)
+        if not self._disconnecting:
+            print(f"[WS] Auto-closing session {self._session_uuid} after saying goodbye.", flush=True)
+            self._disconnecting = True
+            await self.close(code=1000)
+
+    async def _save_session_cost(self):
+        duration = 0
+        if self._start_time:
+            duration = int(time.time() - self._start_time)
+            
+        agent_type = "healthcare"
+        if hasattr(self, "_agent_cfg") and self._agent_cfg:
+            agent_type = self._agent_cfg.get("id", "healthcare")
+
+        if self._usage_metrics["total"] > 0:
+            try:
+                # $3 per 1M input tokens, $12 per 1M output tokens (audio)
+                prompt_cost = float(self._usage_metrics["prompt"]) * 0.000003
+                response_cost = float(self._usage_metrics["response"]) * 0.000012
+                total_cost = prompt_cost + response_cost
+
+                await sync_to_async(GeminiSessionCost.objects.create)(
+                    session_id=self._session_uuid,
+                    agent_type=agent_type,
+                    prompt_tokens=self._usage_metrics["prompt"],
+                    response_tokens=self._usage_metrics["response"],
+                    total_tokens=self._usage_metrics["total"],
+                    estimated_cost_usd=total_cost
+                )
+                print(f"[WS] Saved Gemini session cost: {self._usage_metrics} (${total_cost:.4f}) for {self._session_uuid}", flush=True)
+            except Exception as e:
+                logger.error(f"Failed to save Gemini session cost: {e}")
+                
+        if self._call_history:
+            try:
+                await sync_to_async(CallHistory.objects.create)(
+                    session_id=self._session_uuid,
+                    agent_type=agent_type,
+                    duration_seconds=duration,
+                    transcript=self._call_history
+                )
+                print(f"[WS] Saved CallHistory for {self._session_uuid} (Duration: {duration}s, Turns: {len(self._call_history)})", flush=True)
+            except Exception as e:
+                logger.error(f"Failed to save CallHistory: {e}")
 
 
 # ---------------------------------------------------------------------------
