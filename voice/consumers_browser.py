@@ -212,6 +212,28 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                     sc = getattr(response, "server_content", None)
                     tc = getattr(response, "tool_call", None)
 
+                    # ── Track usage metrics for cost calculation ───────────
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage:
+                        self._usage_metrics["prompt"] = max(self._usage_metrics["prompt"], getattr(usage, "prompt_token_count", 0) or 0)
+                        self._usage_metrics["response"] = max(self._usage_metrics["response"], getattr(usage, "response_token_count", 0) or 0)
+                        self._usage_metrics["total"] = max(self._usage_metrics["total"], getattr(usage, "total_token_count", 0) or 0)
+                        # Audio-specific tokens (field names for Flash 2.0 vary)
+                        input_audio = (
+                            getattr(usage, "audio_input_token_count", 0) or 
+                            getattr(usage, "input_audio_token_count", 0) or
+                            (usage.get("audio_input_token_count", 0) if isinstance(usage, dict) else 0) or
+                            0
+                        )
+                        output_audio = (
+                            getattr(usage, "audio_output_token_count", 0) or 
+                            getattr(usage, "output_audio_token_count", 0) or
+                            (usage.get("audio_output_token_count", 0) if isinstance(usage, dict) else 0) or
+                            0
+                        )
+                        self._usage_metrics["input_audio"] = max(self._usage_metrics["input_audio"], input_audio)
+                        self._usage_metrics["output_audio"] = max(self._usage_metrics["output_audio"], output_audio)
+
                     if sc and getattr(sc, "model_turn", None):
                         for p in sc.model_turn.parts:
                             if getattr(p, "text", None):
@@ -220,6 +242,11 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                     # ── Tool call handling ──────────────────────────────────
                     tool_call = getattr(response, "tool_call", None)
                     if tool_call:
+                        # Before tool call, save any pending agent turn to history
+                        if self._current_agent_turn:
+                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
+                            self._current_agent_turn = ""
+                        
                         function_responses = []
                         for fc in tool_call.function_calls:
                             tool_name = fc.name
@@ -249,13 +276,19 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                     if sc is None:
                         continue
 
+                    # Track user transcription for call history
                     if getattr(sc, "input_transcription", None):
                         t = sc.input_transcription
                         if hasattr(t, "text") and t.text:
                             print(f"[BrowserWS] [User] {t.text}", flush=True)
+                            self._call_history.append({"role": "user", "text": t.text})
 
                     if getattr(sc, "model_turn", None):
                         for part in sc.model_turn.parts:
+                            # Track agent text for call history
+                            if getattr(part, "text", None):
+                                self._current_agent_turn += part.text
+
                             inline = getattr(part, "inline_data", None)
                             if inline and inline.data:
                                 if self._save_as_greeting:
@@ -267,12 +300,34 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                         print("[BrowserWS] Gemini interrupted — sending clear queue command", flush=True)
                         await self.send(text_data=json.dumps({"event": "clear"}))
 
-                    if getattr(sc, "turn_complete", False):
+                        # Save agent turn to call history and detect goodbye
+                        if self._current_agent_turn:
+                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
+                            # print(f"[BrowserWS] [Agent] {self._current_agent_turn}", flush=True)
+                            idx = self._current_agent_turn.lower()
+                            if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
+                                print(f"[BrowserWS] Detected goodbye in agent turn - scheduling close.", flush=True)
+                                self._should_end_call = True
+                            self._current_agent_turn = ""
+                        
                         if self._save_as_greeting and greeting_buffer:
                             _save_wav(bytes(greeting_buffer), greeting_path, OUT_RATE)
                             print(f"[BrowserWS] Greeting saved to {greeting_path}", flush=True)
                             self._save_as_greeting = False
                             greeting_buffer.clear()
+
+                        # Save agent turn to call history and detect goodbye
+                        if self._current_agent_turn:
+                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
+                            idx = self._current_agent_turn.lower()
+                            if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
+                                print("[BrowserWS] Detected goodbye — scheduling disconnect.", flush=True)
+                                self._should_end_call = True
+                            self._current_agent_turn = ""
+
+                        if self._should_end_call:
+                            import asyncio
+                            asyncio.create_task(self._delayed_close(6.0))
 
         except ConnectionClosed as exc:
             print(f"[BrowserWS] Browser receive loop closed: {exc}", flush=True)

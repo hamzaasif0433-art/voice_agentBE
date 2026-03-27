@@ -389,7 +389,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._upsample_state   = None
         self._downsample_state = None
         self._session_uuid     = str(uuid.uuid4())
-        self._usage_metrics    = {"prompt": 0, "response": 0, "total": 0}
+        self._usage_metrics    = {"prompt": 0, "response": 0, "total": 0, "input_audio": 0, "output_audio": 0}
         self._start_time       = None
         self._call_history     = []
         self._current_agent_turn = ""
@@ -620,6 +620,25 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                         self._usage_metrics["prompt"] = max(self._usage_metrics["prompt"], getattr(usage, "prompt_token_count", 0) or 0)
                         self._usage_metrics["response"] = max(self._usage_metrics["response"], getattr(usage, "response_token_count", 0) or 0)
                         self._usage_metrics["total"] = max(self._usage_metrics["total"], getattr(usage, "total_token_count", 0) or 0)
+                        # Audio-specific tokens (field names for Flash 2.0 vary)
+                        input_audio = (
+                            getattr(usage, "audio_input_token_count", 0) or 
+                            getattr(usage, "input_audio_token_count", 0) or
+                            (usage.get("audio_input_token_count", 0) if isinstance(usage, dict) else 0) or
+                            0
+                        )
+                        output_audio = (
+                            getattr(usage, "audio_output_token_count", 0) or 
+                            getattr(usage, "output_audio_token_count", 0) or
+                            (usage.get("audio_output_token_count", 0) if isinstance(usage, dict) else 0) or
+                            0
+                        )
+                        self._usage_metrics["input_audio"] = max(self._usage_metrics["input_audio"], input_audio)
+                        self._usage_metrics["output_audio"] = max(self._usage_metrics["output_audio"], output_audio)
+                        
+                        # Extra fallback: if they are still 0, print the usage object once to debug
+                        if self._usage_metrics["total"] > 1000 and self._usage_metrics["input_audio"] == 0:
+                            print(f"[WS DEBUG] Raw UsageMetadata: {usage}", flush=True)
 
                     print(f"[WS] Recv event: server_content={bool(sc)}, tool_call={bool(tc)}", flush=True)
 
@@ -722,7 +741,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         if hasattr(self, "_agent_cfg") and self._agent_cfg:
             agent_type = self._agent_cfg.get("id", "healthcare")
 
-        if self._usage_metrics["total"] > 0:
+        if self._usage_metrics["total"] > 0 or duration > 0:
             try:
                 # $3 per 1M input tokens, $12 per 1M output tokens (audio)
                 prompt_cost = float(self._usage_metrics["prompt"]) * 0.000003
@@ -735,9 +754,12 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                     prompt_tokens=self._usage_metrics["prompt"],
                     response_tokens=self._usage_metrics["response"],
                     total_tokens=self._usage_metrics["total"],
+                    input_audio_tokens=self._usage_metrics["input_audio"],
+                    output_audio_tokens=self._usage_metrics["output_audio"],
+                    call_duration_seconds=duration,
                     estimated_cost_usd=total_cost
                 )
-                print(f"[WS] Saved Gemini session cost: {self._usage_metrics} (${total_cost:.4f}) for {self._session_uuid}", flush=True)
+                print(f"[WS] Saved Gemini session cost: {self._usage_metrics} (${total_cost:.4f}) duration={duration}s for {self._session_uuid}", flush=True)
             except Exception as e:
                 logger.error(f"Failed to save Gemini session cost: {e}")
                 
