@@ -61,16 +61,6 @@ def create_meeting(appointment):
             'dateTime': end_dt.isoformat(),
             'timeZone': TIMEZONE,
         },
-        # 'attendees': [
-        #     {'email': appointment.email},   # customer
-        #     # {'email': 'your@email.com'},  # optionally add host
-        # ],
-        'conferenceData': {
-            'createRequest': {
-                'requestId': f'appt-{appointment.id}',  # unique per event
-                'conferenceSolutionKey': {'type': 'eventHangout'},
-            }
-        },
         'reminders': {
             'useDefault': False,
             'overrides': [
@@ -80,12 +70,29 @@ def create_meeting(appointment):
         }
     }
 
-    result = service.events().insert(
-        calendarId=CALENDAR_ID,
-        body=event,
-        conferenceDataVersion=1,  # enables Google Meet link creation
-        sendUpdates='none',          # sends email invites to attendees
-    ).execute()
+    # Try creating event WITH Google Meet link first
+    try:
+        event_with_meet = {**event, 'conferenceData': {
+            'createRequest': {
+                'requestId': f'appt-{appointment.id}',
+                'conferenceSolutionKey': {'type': 'hangoutsMeet'},
+            }
+        }}
+        result = service.events().insert(
+            calendarId=CALENDAR_ID,
+            body=event_with_meet,
+            conferenceDataVersion=1,
+            sendUpdates='none',
+        ).execute()
+    except Exception as meet_err:
+        # Meet not supported (free Gmail) — fall back to plain calendar event
+        print(f"Meet link not available, creating plain event: {meet_err}")
+        result = service.events().insert(
+            calendarId=CALENDAR_ID,
+            body=event,
+            conferenceDataVersion=0,
+            sendUpdates='none',
+        ).execute()
 
     return {
         'event_id':  result.get('id'),
