@@ -96,12 +96,24 @@ class AppointmentCreateView(APIView):
             end_time = serializer.validated_data.get('end_time')
 
             # Check if the date is not in the past
-            from datetime import date
+            from datetime import date, datetime as dt
+            import zoneinfo
+            pk_tz = zoneinfo.ZoneInfo('Asia/Karachi')
+            now_pk = dt.now(pk_tz)
+
             if appointment_date < date.today():
                 return Response({
                     "success": False,
                     "message": "Invalid appointment date",
                     "error": "Appointment date cannot be in the past. Please select today or a future date."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Check if the time slot has already passed for today
+            if appointment_date == now_pk.date() and start_time <= now_pk.time():
+                return Response({
+                    "success": False,
+                    "message": "Time slot has passed",
+                    "error": f"Cannot book {start_time.strftime('%H:%M')} today — it is already {now_pk.strftime('%H:%M')}. Please choose a later time."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             # Check if the time slot is available
@@ -265,10 +277,16 @@ class AvailableSlotsView(APIView):
 
         booked_times = [t.strftime('%H:%M') for t in booked]
 
-        # 5. Filter out booked slots
+        # 5. Filter out booked slots AND past slots (for today)
+        import zoneinfo
+        pk_tz = zoneinfo.ZoneInfo('Asia/Karachi')
+        now_pk = datetime.now(pk_tz)
+        is_today = (date == now_pk.date())
+
         available_slots = [
             slot for slot in all_slots
             if slot['start'] not in booked_times
+            and (not is_today or slot['start'] > now_pk.strftime('%H:%M'))
         ]
 
         return Response({

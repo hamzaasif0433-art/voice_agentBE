@@ -82,9 +82,9 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                 "voice": self._voice,
                 "language": self._language,
             })
-            print(f"[BrowserWS] Sending session_ready: {msg}", flush=True)
+            # print(f"[BrowserWS] Sending session_ready: {msg}", flush=True)
             await self.send(text_data=msg)
-            print("[BrowserWS] Sent session_ready to browser", flush=True)
+            # print("[BrowserWS] Sent session_ready to browser", flush=True)
         except Exception as e:
             print(f"[BrowserWS] ERROR Failed to send session_ready: {e}", flush=True)
 
@@ -160,8 +160,8 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
             if not hasattr(self, '_recv_count'):
                 self._recv_count = 0
             self._recv_count += 1
-            if self._recv_count % 50 == 0:
-                print(f"[BrowserWS] Processed {self._recv_count} audio frames from browser...", flush=True)
+            # if self._recv_count % 50 == 0:
+                # print(f"[BrowserWS] Processed {self._recv_count} audio frames from browser...", flush=True)
 
             await session.send_realtime_input(
                 audio=types.Blob(
@@ -170,7 +170,7 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                 )
             )
         except ConnectionClosed as exc:
-            print(f">>> [BrowserWS] Gemini session closed while forwarding audio: {exc}", flush=True)
+            # print(f">>> [BrowserWS] Gemini session closed while forwarding audio: {exc}", flush=True)
             self._clear_session_state()
         except Exception as e:
             print(f">>> [BrowserWS] Error forwarding audio to Gemini: {e}", flush=True)
@@ -179,7 +179,7 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         if hasattr(self, '_debug_mic_buffer') and len(self._debug_mic_buffer) > 0:
             debug_path = Path("media/debug_mic.wav")
             _save_wav(bytes(self._debug_mic_buffer), debug_path, MIC_RATE)
-            print(f"[BrowserWS] Saved {len(self._debug_mic_buffer)} bytes of microphone audio to {debug_path}")
+            # print(f"[BrowserWS] Saved {len(self._debug_mic_buffer)} bytes of microphone audio to {debug_path}")
         await super().disconnect(close_code)
 
     # ------------------------------------------------------------------

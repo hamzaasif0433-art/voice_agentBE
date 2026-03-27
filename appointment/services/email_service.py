@@ -10,7 +10,6 @@ def send_appointment_email(appointment):
     if not appointment.email:
         return
 
-    meet_link     = appointment.meet_link     or 'Not generated'
     calendar_link = appointment.calendar_link or 'Not generated'
 
     subject = f"Appointment Confirmation - {appointment.date.strftime('%B %d, %Y')}"
@@ -22,9 +21,11 @@ Your appointment has been confirmed. Here are your details:
   Date       : {appointment.date.strftime('%A, %B %d, %Y')}
   Time       : {appointment.start_time.strftime('%I:%M %p')} - {appointment.end_time.strftime('%I:%M %p')}
   Status     : {appointment.status.capitalize()}
-  Google Meet: {meet_link}
   Calendar   : {calendar_link}
 """
+
+    if appointment.meet_link:
+        message += f"  Google Meet: {appointment.meet_link}\n"
 
     if appointment.notes:
         message += f"\n  Notes      : {appointment.notes}\n"
