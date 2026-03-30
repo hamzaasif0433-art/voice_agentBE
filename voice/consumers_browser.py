@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import urllib.parse
+import truststore
+truststore.inject_into_ssl()
 
 from .consumers1 import VoiceAgentConsumer, MIC_RATE, OUT_RATE, _save_wav
 from .agents.registry import get_agent
@@ -58,10 +60,10 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         self._voice = params.get("voice", self._agent_cfg["default_voice"])
         self._language = params.get("language", self._agent_cfg["default_language"])
 
-        print(
-            f"[BrowserWS] Agent='{agent_id}' Voice='{self._voice}' Language='{self._language}'",
-            flush=True,
-        )
+        # print(
+        #     f"[BrowserWS] Agent='{agent_id}' Voice='{self._voice}' Language='{self._language}'",
+        #     flush=True,
+        # )
 
         # Delegate to parent (creates Gemini client, starts session task)
         await super().connect()
@@ -92,11 +94,12 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
     # Override: expose dynamic config to parent _run_gemini_session
     # ------------------------------------------------------------------
 
-    def _get_system_prompt(self, has_cached_greeting: bool = False) -> str:
+    def _get_system_prompt(self, has_cached_greeting: bool = False, schedule_data: list = None) -> str:
         return self._agent_cfg["build_system_prompt"](
             language=self._language,
             voice=self._voice,
-            has_cached_greeting=has_cached_greeting
+            has_cached_greeting=has_cached_greeting,
+            schedule_data=schedule_data,
         )
 
     def _get_tools(self):
@@ -160,8 +163,7 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
             if not hasattr(self, '_recv_count'):
                 self._recv_count = 0
             self._recv_count += 1
-            # if self._recv_count % 50 == 0:
-                # print(f"[BrowserWS] Processed {self._recv_count} audio frames from browser...", flush=True)
+                  # print(f"[BrowserWS] Processed {self._recv_count} audio frames from browser...", flush=True)
 
             await session.send_realtime_input(
                 audio=types.Blob(
@@ -218,21 +220,31 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                         self._usage_metrics["prompt"] = max(self._usage_metrics["prompt"], getattr(usage, "prompt_token_count", 0) or 0)
                         self._usage_metrics["response"] = max(self._usage_metrics["response"], getattr(usage, "response_token_count", 0) or 0)
                         self._usage_metrics["total"] = max(self._usage_metrics["total"], getattr(usage, "total_token_count", 0) or 0)
-                        # Audio-specific tokens (field names for Flash 2.0 vary)
-                        input_audio = (
-                            getattr(usage, "audio_input_token_count", 0) or 
-                            getattr(usage, "input_audio_token_count", 0) or
-                            (usage.get("audio_input_token_count", 0) if isinstance(usage, dict) else 0) or
-                            0
-                        )
-                        output_audio = (
-                            getattr(usage, "audio_output_token_count", 0) or 
-                            getattr(usage, "output_audio_token_count", 0) or
-                            (usage.get("audio_output_token_count", 0) if isinstance(usage, dict) else 0) or
-                            0
-                        )
-                        self._usage_metrics["input_audio"] = max(self._usage_metrics["input_audio"], input_audio)
-                        self._usage_metrics["output_audio"] = max(self._usage_metrics["output_audio"], output_audio)
+
+                        prompt_details = getattr(usage, "prompt_tokens_details", None) or []
+                        for detail in prompt_details:
+                            modality = getattr(detail, "modality", None)
+                            token_count = getattr(detail, "token_count", 0) or 0
+                            modality_str = str(modality).upper() if modality else ""
+                            if "TEXT" in modality_str:
+                                self._usage_metrics["input_text"] = max(self._usage_metrics["input_text"], token_count)
+                            elif "AUDIO" in modality_str:
+                                self._usage_metrics["input_audio"] = max(self._usage_metrics["input_audio"], token_count)
+
+                        response_details = getattr(usage, "response_tokens_details", None) or []
+                        for detail in response_details:
+                            modality = getattr(detail, "modality", None)
+                            token_count = getattr(detail, "token_count", 0) or 0
+                            modality_str = str(modality).upper() if modality else ""
+                            if "TEXT" in modality_str:
+                                self._usage_metrics["output_text"] = max(self._usage_metrics["output_text"], token_count)
+                            elif "AUDIO" in modality_str:
+                                self._usage_metrics["output_audio"] = max(self._usage_metrics["output_audio"], token_count)
+
+                        if not getattr(self, "_logged_modality_sample", False) and self._usage_metrics["total"] > 0:
+                            self._logged_modality_sample = True
+                            print(f"[BrowserWS DEBUG] prompt_tokens_details: {prompt_details}", flush=True)
+                            print(f"[BrowserWS DEBUG] response_tokens_details: {response_details}", flush=True)
 
                     if sc and getattr(sc, "model_turn", None):
                         for p in sc.model_turn.parts:
@@ -269,7 +281,7 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                             print(f"[BrowserWS] Successfully sent tool responses for {len(function_responses)} calls", flush=True)
                         except Exception as e:
                             print(f">>> [BrowserWS ERROR] Failed to send tool response: {repr(e)}", flush=True)
-                        continue
+                        # REMOVED: continue — Gemini 3.1 can send tool responses + server_content in one event
 
                     # ── Audio + transcription handling ──────────────────────
                     sc = getattr(response, "server_content", None)
@@ -283,11 +295,20 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                             print(f"[BrowserWS] [User] {t.text}", flush=True)
                             self._call_history.append({"role": "user", "text": t.text})
 
+                    # Track model transcription (voice) for high-fidelity audio history
+                    if getattr(sc, "output_transcription", None):
+                        t = sc.output_transcription
+                        if hasattr(t, "text") and t.text:
+                            # print(f"[BrowserWS] [Agent Voice] {t.text}", flush=True)
+                            if not self._current_agent_turn.endswith(t.text):
+                                self._current_agent_turn += t.text
+
                     if getattr(sc, "model_turn", None):
                         for part in sc.model_turn.parts:
-                            # Track agent text for call history
+                            # Also track direct text parts (though rarer in Voice mode)
                             if getattr(part, "text", None):
-                                self._current_agent_turn += part.text
+                                if not self._current_agent_turn.endswith(part.text):
+                                    self._current_agent_turn += part.text
 
                             inline = getattr(part, "inline_data", None)
                             if inline and inline.data:
@@ -295,33 +316,26 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                                     greeting_buffer.extend(inline.data)
                                 await self.send(bytes_data=inline.data)
 
+                    # Manage Greeting Saving
+                    if (getattr(sc, "turn_complete", False) or getattr(sc, "interrupted", False)) and self._save_as_greeting and greeting_buffer:
+                        _save_wav(bytes(greeting_buffer), greeting_path, OUT_RATE)
+                        print(f"[BrowserWS] Greeting saved to {greeting_path}", flush=True)
+                        self._save_as_greeting = False
+                        greeting_buffer.clear()
+
+                    # Handle Barge-in (Interrupted)
                     if getattr(sc, "interrupted", False):
                         import json
                         print("[BrowserWS] Gemini interrupted — sending clear queue command", flush=True)
                         await self.send(text_data=json.dumps({"event": "clear"}))
 
-                        # Save agent turn to call history and detect goodbye
+                    # Save agent turn to history and detect goodbye
+                    if getattr(sc, "turn_complete", False) or getattr(sc, "interrupted", False):
                         if self._current_agent_turn:
-                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
-                            # print(f"[BrowserWS] [Agent] {self._current_agent_turn}", flush=True)
+                            self._call_history.append({"role": "agent", "text": self._current_agent_turn.strip()})
                             idx = self._current_agent_turn.lower()
                             if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
-                                print(f"[BrowserWS] Detected goodbye in agent turn - scheduling close.", flush=True)
-                                self._should_end_call = True
-                            self._current_agent_turn = ""
-                        
-                        if self._save_as_greeting and greeting_buffer:
-                            _save_wav(bytes(greeting_buffer), greeting_path, OUT_RATE)
-                            print(f"[BrowserWS] Greeting saved to {greeting_path}", flush=True)
-                            self._save_as_greeting = False
-                            greeting_buffer.clear()
-
-                        # Save agent turn to call history and detect goodbye
-                        if self._current_agent_turn:
-                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
-                            idx = self._current_agent_turn.lower()
-                            if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
-                                print("[BrowserWS] Detected goodbye — scheduling disconnect.", flush=True)
+                                print(f"[BrowserWS] Detected goodbye — scheduling disconnect.", flush=True)
                                 self._should_end_call = True
                             self._current_agent_turn = ""
 

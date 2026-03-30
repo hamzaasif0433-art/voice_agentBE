@@ -13,8 +13,10 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from websockets.exceptions import ConnectionClosed
 from google.oauth2 import service_account
 import vertexai
+import truststore
 import uuid
 import time
+truststore.inject_into_ssl()
 from asgiref.sync import sync_to_async
 from Analytics.models import GeminiSessionCost, CallHistory
 
@@ -244,8 +246,6 @@ get_schedule → get_available_slots → book_appointment
 # Tool definitions
 # ---------------------------------------------------------------------------
 
-BASE_URL = os.getenv("API_BASE_URL", "https://web-production-00424.up.railway.app")
-
 TOOLS = [
     types.Tool(
         function_declarations=[
@@ -325,7 +325,7 @@ TOOLS = [
     )
 ]
 
-LIVE_MODEL = "gemini-live-2.5-flash-native-audio"
+LIVE_MODEL = "gemini-3.1-flash-live-preview"
 VOICE_NAME = "Aoede"
 
 
@@ -333,43 +333,9 @@ VOICE_NAME = "Aoede"
 # Tool execution — calls your Django backend APIs
 # ---------------------------------------------------------------------------
 
-async def execute_tool(tool_name: str, tool_args: dict) -> dict:
-    """Execute tool calls by hitting the backend REST APIs."""
-    import aiohttp
-
-    try:
-        async with aiohttp.ClientSession() as http:
-            base = os.getenv("API_BASE_URL", "https://web-production-00424.up.railway.app")
-
-
-            if tool_name == "get_schedule":
-                async with http.get(f"{base}/appointment/schedule/") as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
-
-            elif tool_name == "get_available_slots":
-                date = tool_args.get("date", "")
-                async with http.get(
-                    f"{base}/appointment/slots/",
-                    params={"date": date}
-                ) as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
-
-            elif tool_name == "book_appointment":
-                async with http.post(
-                    f"{base}/appointment/create/",
-                    json=tool_args,
-                ) as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
-
-            else:
-                return {"error": f"Unknown tool: {tool_name}"}
-
-    except Exception as e:
-        logger.error(f"Tool execution error [{tool_name}]: {e}")
-        return {"error": str(e)}
+# execute_tool removed — tool calls now go through self._execute_tool()
+# which delegates to the agent-specific execute_tool (e.g. healthcare.execute_tool)
+# that queries Django ORM directly instead of making HTTP requests.
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +355,16 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._upsample_state   = None
         self._downsample_state = None
         self._session_uuid     = str(uuid.uuid4())
-        self._usage_metrics    = {"prompt": 0, "response": 0, "total": 0, "input_audio": 0, "output_audio": 0}
+        self._usage_metrics    = {
+            "prompt": 0, "response": 0, "total": 0,
+            "input_text": 0, "input_audio": 0,
+            "output_text": 0, "output_audio": 0,
+        }
         self._start_time       = None
         self._call_history     = []
         self._current_agent_turn = ""
         self._should_end_call  = False
+        self._last_session_handle = None
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle
@@ -409,14 +380,12 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             flush=True,
         )
 
-        # credentials and vertexai.init() already done at module level
+        # Use Direct Google AI Studio API for Gemini 3.1 Flash Live Preview
+        # This resolves the 1008 (Vertex AI) Policy Violation error encountered in us-central1
         self.client = genai.Client(
-            vertexai=True,
-            project=_PROJECT,
-            location=_LOCATION,
-            credentials=_credentials,
+            api_key=os.environ.get("GEMINI_API_KEY"),
         )
-        print("[WS Connect] Gemini client created OK", flush=True)
+        print(f"[WS Connect] Gemini client created (Direct API)", flush=True)
 
         task = asyncio.create_task(self._run_gemini_session())
         self._tasks.append(task)
@@ -444,8 +413,8 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                     mime_type=f"audio/pcm;rate={MIC_RATE}",
                 )
             )
-        except ConnectionClosed as exc:
-            logger.info("Gemini session closed while forwarding audio: %s", exc)
+        except Exception as exc:
+            logger.info("Gemini session error while forwarding audio: %s", exc)
             self._clear_session_state()
 
     async def disconnect(self, close_code):
@@ -469,9 +438,15 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     # Override hooks — subclasses implement these for dynamic config
     # ------------------------------------------------------------------
 
-    def _get_system_prompt(self, has_cached_greeting: bool = False) -> str:
+    async def _fetch_schedule_data(self) -> list:
+        from appointment.models import Schedule
+        from appointment.serializers import ScheduleSerializer
+        schedules = await sync_to_async(lambda: list(Schedule.objects.all()))()
+        return ScheduleSerializer(schedules, many=True).data
+
+    def _get_system_prompt(self, has_cached_greeting: bool = False, schedule_data: list = None) -> str:
         from .agents.healthcare import build_system_prompt
-        return build_system_prompt(has_cached_greeting=has_cached_greeting)
+        return build_system_prompt(has_cached_greeting=has_cached_greeting, schedule_data=schedule_data)
 
     def _get_tools(self):
         from .agents.healthcare import TOOLS
@@ -510,7 +485,8 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         greeting_path = self._get_greeting_path()
         has_cached_greeting = greeting_path.exists()
         
-        system_prompt = self._get_system_prompt(has_cached_greeting=has_cached_greeting)
+        schedule_data = await self._fetch_schedule_data()
+        system_prompt = self._get_system_prompt(has_cached_greeting=has_cached_greeting, schedule_data=schedule_data)
         tools         = self._get_tools()
 
         live_config = types.LiveConnectConfig(
@@ -527,6 +503,12 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 ),
                 language_code=language_code,
             ),
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                sliding_window=types.SlidingWindow(),
+            ),
+            session_resumption=types.SessionResumptionConfig(handle=self._last_session_handle),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=False,
@@ -544,14 +526,14 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             ) as session:
                 self.gemini_session = session
                 self._session_ready.set()
-                print("[WS] Gemini Live session open successfully!", flush=True)
+                # print("[WS] Gemini Live session open successfully!", flush=True)
 
                 await self._on_gemini_ready()
                 await self._handle_greeting(session)
                 await self._receive_loop(session)
 
                 if not self._disconnecting:
-                    print("[WS INFO] Gemini Live session receive loop ended cleanly — closing WebSocket", flush=True)
+                    # print("[WS INFO] Gemini Live session receive loop ended cleanly — closing WebSocket", flush=True)
                     await self.close()
 
         except asyncio.CancelledError:
@@ -581,20 +563,11 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             # We explicitly do NOT send a user text message here, because doing so
             # forces Gemini Live to generate a verbal text/audio response immediately.
             # The context is now provided via system_instruction!
-        else:
-            # No cached greeting — ask model to greet the user warmly
+            # Ask model to greet the user warmly via realtime input
             generate_prompt = self._get_generate_greeting_prompt()
             print("[WS] No greeting file — asking Gemini to generate greeting", flush=True)
             self._save_as_greeting = True
-            await session.send_client_content(
-                turns=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part(text=generate_prompt)],
-                    )
-                ],
-                turn_complete=True,
-            )
+            await session.send_realtime_input(text=generate_prompt)
         print("[WS] _handle_greeting completed", flush=True)
 
     async def _stream_pcm_to_sip(self, pcm_24k: bytes):
@@ -622,29 +595,55 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                         self._usage_metrics["prompt"] = max(self._usage_metrics["prompt"], getattr(usage, "prompt_token_count", 0) or 0)
                         self._usage_metrics["response"] = max(self._usage_metrics["response"], getattr(usage, "response_token_count", 0) or 0)
                         self._usage_metrics["total"] = max(self._usage_metrics["total"], getattr(usage, "total_token_count", 0) or 0)
-                        # Audio-specific tokens (field names for Flash 2.0 vary)
-                        input_audio = (
-                            getattr(usage, "audio_input_token_count", 0) or 
-                            getattr(usage, "input_audio_token_count", 0) or
-                            (usage.get("audio_input_token_count", 0) if isinstance(usage, dict) else 0) or
-                            0
-                        )
-                        output_audio = (
-                            getattr(usage, "audio_output_token_count", 0) or 
-                            getattr(usage, "output_audio_token_count", 0) or
-                            (usage.get("audio_output_token_count", 0) if isinstance(usage, dict) else 0) or
-                            0
-                        )
-                        self._usage_metrics["input_audio"] = max(self._usage_metrics["input_audio"], input_audio)
-                        self._usage_metrics["output_audio"] = max(self._usage_metrics["output_audio"], output_audio)
                         
-                        # Extra fallback: if they are still 0, print the usage object once to debug
-                        if self._usage_metrics["total"] > 1000 and self._usage_metrics["input_audio"] == 0:
-                            print(f"[WS DEBUG] Raw UsageMetadata: {usage}", flush=True)
+                        # Thinking tokens are billed at the text output rate
+                        thoughts_count = getattr(usage, "thoughts_token_count", 0) or 0
+                        if thoughts_count > 0:
+                            self._usage_metrics["output_text"] = max(self._usage_metrics["output_text"], thoughts_count)
+
+                        # Parse prompt details (modality-specific in)
+                        prompt_details = getattr(usage, "prompt_tokens_details", None) or []
+                        for detail in prompt_details:
+                            modality = getattr(detail, "modality", None)
+                            token_count = getattr(detail, "token_count", 0) or 0
+                            modality_str = str(modality).upper() if modality else ""
+                            if "TEXT" in modality_str:
+                                self._usage_metrics["input_text"] = max(self._usage_metrics["input_text"], token_count)
+                            elif "AUDIO" in modality_str:
+                                self._usage_metrics["input_audio"] = max(self._usage_metrics["input_audio"], token_count)
+
+                        # Parse response details (modality-specific out)
+                        response_details = getattr(usage, "response_tokens_details", None) or []
+                        for detail in response_details:
+                            modality = getattr(detail, "modality", None)
+                            token_count = getattr(detail, "token_count", 0) or 0
+                            modality_str = str(modality).upper() if modality else ""
+                            if "TEXT" in modality_str:
+                                self._usage_metrics["output_text"] = max(self._usage_metrics["output_text"], token_count)
+                            elif "AUDIO" in modality_str:
+                                self._usage_metrics["output_audio"] = max(self._usage_metrics["output_audio"], token_count)
+
+                        if not getattr(self, "_logged_modality_sample", False) and self._usage_metrics["total"] > 0:
+                            self._logged_modality_sample = True
+                            print(f"[WS DEBUG] Gemini 3.1 Usage Metadata Captured: {self._usage_metrics}", flush=True)
 
                     print(f"[WS] Recv event: server_content={bool(sc)}, tool_call={bool(tc)}", flush=True)
 
+                    if getattr(response, "session_resumption_update", None):
+                        update = response.session_resumption_update
+                        if update.resumable and update.new_handle:
+                            print(f"[WS] Received new session resumption handle: {update.new_handle[:8]}...", flush=True)
+                            self._last_session_handle = update.new_handle
+
+                    if getattr(response, "go_away", None):
+                        go_away = response.go_away
+                        logger.warning(f"[WS] Received GoAway message. Time left: {go_away.time_left}s")
+                        # You could trigger a wrap-up here if time_left is very small
+
                     if sc:
+                        if getattr(sc, "generation_complete", False):
+                            print("[WS DEBUG] Generation complete", flush=True)
+
                         print(f"[WS DEBUG] turn_complete={getattr(sc, 'turn_complete', False)}, interrupted={getattr(sc, 'interrupted', False)}", flush=True)
                         if getattr(sc, "model_turn", None):
                             for p in sc.model_turn.parts:
@@ -659,8 +658,15 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             tool_args = dict(fc.args) if fc.args else {}
                             print(f"[WS] [Tool Call] {tool_name}({tool_args})", flush=True)
 
-                            result = await execute_tool(tool_name, tool_args)
+                            result = await self._execute_tool(tool_name, tool_args)
                             print(f"[WS] [Tool Result] {tool_name} → {result}", flush=True)
+
+                            self._call_history.append({
+                                "role": "tool",
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                                "tool_result": result,
+                            })
 
                             function_responses.append(
                                 types.FunctionResponse(
@@ -677,7 +683,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             print(f"[WS] Successfully sent tool responses for {len(function_responses)} calls", flush=True)
                         except Exception as e:
                             print(f">>> [WS ERROR] Failed to send tool response to Gemini: {repr(e)}", flush=True)
-                        continue
+                        # REMOVED: continue — Gemini 3.1 can send tool responses + server_content in one event
 
                     sc = getattr(response, "server_content", None)
                     if sc is None:
@@ -685,14 +691,25 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
                     if getattr(sc, "input_transcription", None):
                         t = sc.input_transcription
-                        if hasattr(t, "text") and t.text:
+                        if hasattr(t, "text") and getattr(t, "text", None):
                             print(f"[WS] [User] {t.text}", flush=True)
                             self._call_history.append({"role": "user", "text": t.text})
+
+                    if getattr(sc, "output_transcription", None):
+                        t = sc.output_transcription
+                        if hasattr(t, "text") and t.text:
+                            print(f"[WS] [Agent Voice] {t.text}", flush=True)
+                            # Favor output_transcription for high-fidelity audio history
+                            self._current_agent_turn += t.text
 
                     if getattr(sc, "model_turn", None):
                         for part in sc.model_turn.parts:
                             if getattr(part, "text", None):
-                                self._current_agent_turn += part.text
+                                # Only add if it's not already covered by transcription
+                                # Note: In Live API, if response_modalities includes AUDIO,
+                                # text parts are usually redundant or empty.
+                                if not self._current_agent_turn.endswith(part.text):
+                                    self._current_agent_turn += part.text
 
                             inline = getattr(part, "inline_data", None)
                             if inline and inline.data:
@@ -701,7 +718,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                                 sip_audio = _pcm_to_mulaw(inline.data)
                                 await self.send(bytes_data=sip_audio)
 
-                    if getattr(sc, "turn_complete", False):
+                    if getattr(sc, "turn_complete", False) or getattr(sc, "interrupted", False):
                         if self._save_as_greeting and greeting_buffer:
                             save_path = self._get_greeting_path()
                             _save_wav(bytes(greeting_buffer), save_path, OUT_RATE)
@@ -710,7 +727,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             greeting_buffer.clear()
                             
                         if self._current_agent_turn:
-                            self._call_history.append({"role": "agent", "text": self._current_agent_turn})
+                            self._call_history.append({"role": "agent", "text": self._current_agent_turn.strip()})
                             idx = self._current_agent_turn.lower()
                             if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
                                 print("[WS] Detected call end greeting (Allah Hafiz) — scheduling disconnect.", flush=True)
@@ -745,10 +762,14 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
         if self._usage_metrics["total"] > 0 or duration > 0:
             try:
-                # $3 per 1M input tokens, $12 per 1M output tokens (audio)
-                prompt_cost = float(self._usage_metrics["prompt"]) * 0.000003
-                response_cost = float(self._usage_metrics["response"]) * 0.000012
-                total_cost = prompt_cost + response_cost
+                # Gemini 3.1 Flash pricing (estimated):
+                # Input: $0.75/1M text, $3.00/1M audio
+                # Output: $4.50/1M text, $12.00/1M audio
+                input_text_cost   = float(self._usage_metrics["input_text"])  * 0.00000075  # $0.75/1M
+                input_audio_cost  = float(self._usage_metrics["input_audio"]) * 0.000003    # $3.00/1M
+                output_text_cost  = float(self._usage_metrics["output_text"]) * 0.0000045   # $4.50/1M
+                output_audio_cost = float(self._usage_metrics["output_audio"]) * 0.000012   # $12.00/1M
+                total_cost = input_text_cost + input_audio_cost + output_text_cost + output_audio_cost
 
                 await sync_to_async(GeminiSessionCost.objects.create)(
                     session_id=self._session_uuid,
@@ -756,12 +777,23 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                     prompt_tokens=self._usage_metrics["prompt"],
                     response_tokens=self._usage_metrics["response"],
                     total_tokens=self._usage_metrics["total"],
+                    input_text_tokens=self._usage_metrics["input_text"],
                     input_audio_tokens=self._usage_metrics["input_audio"],
+                    output_text_tokens=self._usage_metrics["output_text"],
                     output_audio_tokens=self._usage_metrics["output_audio"],
                     call_duration_seconds=duration,
-                    estimated_cost_usd=total_cost
+                    estimated_cost_usd=total_cost,
                 )
-                print(f"[WS] Saved Gemini session cost: {self._usage_metrics} (${total_cost:.4f}) duration={duration}s for {self._session_uuid}", flush=True)
+                print(
+                    f"[WS] Session cost: "
+                    f"in_text={self._usage_metrics['input_text']}, "
+                    f"in_audio={self._usage_metrics['input_audio']}, "
+                    f"out_text={self._usage_metrics['output_text']}, "
+                    f"out_audio={self._usage_metrics['output_audio']}, "
+                    f"total={self._usage_metrics['total']} "
+                    f"(${total_cost:.6f}) duration={duration}s",
+                    flush=True,
+                )
             except Exception as e:
                 logger.error(f"Failed to save Gemini session cost: {e}")
                 

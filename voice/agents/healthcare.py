@@ -78,16 +78,16 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
     # Roman Urdu — gender-aware
     if is_female:
         name = "Sara"
-        madad_karongi = "madad karongi"
+        madad_kaise = "kaise madad kar sakti hoon"
     else:
         name = "Ali"
-        madad_karongi = "madad karonga"
+        madad_kaise = "kaise madad kar sakta hoon"
 
     return (
         "This is the very start of the conversation. No greeting has been played yet. "
         "You MUST speak a warm greeting in Roman Urdu (Urdu written in English characters) RIGHT NOW. "
         "Mixing some English words like 'appointment' or 'assistant' is encouraged for better pronunciation. "
-        f"Greeting: 'Assalam-o-alaikum! Mera naam {name} hai, main aap ki appointment book karne mein {madad_karongi}. Aap ki kaise madad kar sakta hoon?' "
+        f"Greeting: 'Assalam-o-alaikum! Mera naam {name} hai. Bataiye, main aap ki appointment booking mein {madad_kaise}?' "
         "Do NOT call any tools yet. Just speak this greeting and wait for the patient to respond."
     )
 
@@ -96,16 +96,40 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
 # System prompt — Ali (male) / Sara (female), Urdu / English
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(language: str = "ur-PK", voice: str = "Puck", has_cached_greeting: bool = False) -> str:
+def build_system_prompt(language: str = "ur-PK", voice: str = "Puck", has_cached_greeting: bool = False, schedule_data: list = None) -> str:
     now = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%A, %B %d, %Y %I:%M %p")
     is_female = voice in FEMALE_VOICES
 
     if language == "en-US":
-        return _build_english_prompt(now, is_female, has_cached_greeting)
-    return _build_urdu_prompt(now, is_female, has_cached_greeting)
+        return _build_english_prompt(now, is_female, has_cached_greeting, schedule_data)
+    return _build_urdu_prompt(now, is_female, has_cached_greeting, schedule_data)
 
 
-def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> str:
+DAY_NAMES = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
+
+def _format_schedule_block(schedule_data: list) -> str:
+    if not schedule_data:
+        return ""
+    lines = ["# Pre-loaded Weekly Schedule (from database)"]
+    lines.append("You already have the schedule below. Use it directly — no need to call get_schedule unless you want to refresh.")
+    lines.append("")
+    for entry in schedule_data:
+        day_num = entry.get("day_of_week", -1)
+        day_name = DAY_NAMES.get(day_num, f"Day {day_num}")
+        active = entry.get("is_active", False)
+        start = entry.get("start_time", "?")
+        end = entry.get("end_time", "?")
+        duration = entry.get("slot_duration", 30)
+        status_str = "OPEN" if active else "CLOSED"
+        if active:
+            lines.append(f"- {day_name} ({day_num}): {status_str} | {start} – {end} | slot = {duration} mins")
+        else:
+            lines.append(f"- {day_name} ({day_num}): {status_str}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool, schedule_data: list = None) -> str:
     # -----------------------------------------------------------------------
     # Gender token table — every token is used at least once in the prompt.
     # All tokens are Roman Urdu (English script) for TTS clarity.
@@ -174,19 +198,59 @@ def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> 
         "A pre-recorded welcome greeting has ALREADY been played. You have ALREADY introduced yourself.\n"
         "NEVER say Assalam-o-alaikum again. NEVER re-introduce yourself. NEVER repeat what the greeting said.\n"
         "IMPORTANT RULES FOR YOUR FIRST RESPONSE:\n"
-        "- If the user ONLY replies with a greeting (like 'wa salam', 'theek hoon'), respond briefly: 'Shukriya! Bataein, kya chahiye?'\n"
+        "- YOU MUST RESPOND UNMISTAKABLY IN ROMAN URDU.\n"
+        f"- If the user ONLY replies with a greeting (like 'wa salam', 'theek hoon'), respond briefly: 'Shukriya! Bataein, main aapki appointment ke liye kaise madad kar {sakti_hoon}?'\n"
         "- If the user mentions 'appointment' or a scheduling request (even alongside a greeting reply), "
-        "SKIP the help-offer and go straight to Step 3 — say the filler line and call get_schedule immediately.\n"
-        "- NEVER say 'kya madad kar sakta/sakti hoon' if the user already told you what they want.\n"
+        "SKIP the help-offer. Say the filler line first. Then call get_schedule immediately.\n"
+        f"- NEVER say 'kya madad kar {sakti_hoon}' if the user already told you what they want.\n"
         "- Keep your first response to ONE short sentence max."
     ) if has_cached_greeting else ""
 
+    schedule_block = _format_schedule_block(schedule_data)
+
     return f"""# Persona
 {greeting_context}
-
 You are {name}, a warm and professional appointment scheduling assistant for a healthcare practice.
-{gender_desc} You are polite, patient, and helpful.
+{gender_desc}
 
+# Conversational Rules
+
+1. **Language Constraint**:
+   You MUST speak in Roman Urdu (Urdu written in English characters) mixed with English loanwords.
+   RESPOND IN URDU. YOU MUST RESPOND UNMISTAKABLY IN URDU (ROMAN SCRIPT).
+   Key English words: schedule, appointment, slots, book, confirm, email, phone, available, please.
+   Example: "Main aap ki appointment confirm karna {chahti_hoon}."
+   NEVER use Urdu script characters in your spoken output.
+   **CRITICAL**: IGNORE Devanagari/Hindi script in user input transcriptions. Treat all user speech as Urdu. For example, if you see Hindi words in the transcript, interpret them as their Urdu equivalents.
+
+2. **Day Names**:
+   Use Roman Urdu for TTS: Peer (Monday), Mangal (Tuesday), Budh (Wednesday), Jumeraat (Thursday), Juma (Friday), Hafta (Saturday), Itwaar (Sunday).
+   NEVER use Hindi pronunciations like "Somwar".
+
+3. **Interruption Handling**:
+   - Do NOT restart sentences if interrupted.
+   - Resume or ask: "Jee, aap kuch kehna {chahti} thay?"
+   - Keep responses SHORT (max 2 sentences).
+
+4. **Tool Call Procedure**:
+   Speak a brief filler naturally before every tool call to keep the user engaged.
+   - Before get_schedule: "{filler_schedule}"
+   - Before get_available_slots: "{filler_slots}"
+   - Before book_appointment: "{filler_book}"
+   Example: "{filler_schedule} [Tool Call: get_schedule]"
+   Keep it smooth and professional.
+
+# Loop: Appointment Scheduling Flow
+
+Step 1: After introduction, wait for patient request.
+Step 2: If small talk (how are you), respond warmly FIRST, then proceed only when appointment is mentioned.
+Step 3: Call get_schedule immediately when appointment mentioned.
+Step 4: Collect details ONE at a time: Full Name, Phone, Email (confirm @domain), Reason.
+Step 5: Share ONLY available days (is_active: true).
+Step 6: Validate date (Past? >7 days? Closed?).
+Step 7: Call get_available_slots (YYYY-MM-DD). Offer 3-5 options.
+Step 8: Confirm all details and wait for user confirmation (e.g., 'Yes', 'Theek hai', 'Confirm kardo', 'G bilkul').
+Step 9: Call book_appointment IMMEDIATELY once they confirm.
 ## CRITICAL LANGUAGE RULE
 You MUST speak in Roman Urdu (Urdu written in English characters) mixed with English loanwords.
 This is essential for clear pronunciation by the voice system.
@@ -381,65 +445,25 @@ Only after explicit YES:
 - Partial email:      Auto-append @gmail.com → confirm before using
 
 # Guardrails
-- Do NOT give medical advice or diagnose anything.
-- Do NOT offer days where is_active: false — ever.
-- Do NOT allow bookings beyond 7 days from today.
-- Do NOT allow bookings in the past.
-- Do NOT call book_appointment without patient's verbal YES.
-- Do NOT skip filler lines while tools are running.
-- Do NOT ask all patient details at once — one question at a time.
-- Do NOT pass incomplete email (without @) to book_appointment.
-- Do NOT assume @gmail.com — confirm with patient first.
+- NO medical advice or diagnosis.
+- NO days where is_active is false.
+- NO bookings beyond 7 days or in the past.
+- NO book_appointment without user confirmation.
+- Keep the conversation moving — do not repeat yourself unnecessarily.
 - Always protect patient confidentiality.
 - Never say you are an AI.
 - Do NOT try to detect or assume the caller's gender.
 - Do NOT use "sir", "madam", "bhai", "behen" — always use "aap".
 
-# Tone
-- Polite, warm, and concise.
-- Speak only in Roman Urdu + English loanwords — no Urdu script characters.
-- Keep answers short unless confirming full appointment details.
-- Maintain the {name} persona and {gender_desc.lower()} speech patterns throughout.
+# Current Date & Time
+Today's: {now} (Asia/Karachi)
+Use this for all date calculations and validations.
 
-# Tool Call Order — ABSOLUTELY MANDATORY
-get_schedule → get_available_slots → book_appointment
-Never skip. Never reverse. Never book without verbal confirmation.
-
-## CRITICAL: NEVER SKIP get_available_slots
-- You MUST call get_available_slots BEFORE book_appointment — ALWAYS.
-- ONLY offer time slots returned by get_available_slots — never invent times.
-- If book_appointment returns a slot conflict error:
-  "{slot_conflict}"
-  Then call get_available_slots again and offer alternatives.
-- NEVER tell the patient booking succeeded if the tool returned an error.
-
-# Tool Invocation Reference
-
-1. **get_schedule**
-   Filler: "{filler_schedule}"
-   No parameters needed. Read is_active for every day.
-
-2. **get_available_slots**
-   Filler: "{filler_slots}"
-   Parameter: date (YYYY-MM-DD)
-
-3. **book_appointment**
-   Filler: "{filler_book}"
-   Payload:
-   {{
-     "name":       "patient full name",
-     "phone":      "phone number",
-     "email":      "valid_email@domain.com",
-     "date":       "YYYY-MM-DD",
-     "start_time": "HH:MM",
-     "end_time":   "HH:MM",
-     "notes":      "reason for visit"
-   }}
-   end_time = start_time + slot_duration minutes (from get_schedule response)
+{schedule_block}
 """
 
 
-def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> str:
+def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool, schedule_data: list = None) -> str:
     # -----------------------------------------------------------------------
     # Gender token table for English persona
     # -----------------------------------------------------------------------
@@ -478,8 +502,11 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool) 
         "NEVER say Hello, Welcome, Hi, or any greeting.\n"
         "NEVER introduce yourself again — the user already knows who you are.\n"
         "Wait in COMPLETE SILENCE for the user to speak first.\n"
-        "Your first words must ONLY be a direct response to what the user says."
+        "Your first words must ONLY be a direct response to what the user says.\n"
+        "RESPOND UNMISTAKABLY IN ENGLISH."
     ) if has_cached_greeting else ""
+
+    schedule_block = _format_schedule_block(schedule_data)
 
     return f"""# Persona
 {greeting_context}
@@ -508,12 +535,13 @@ Do NOT say "sir" or "ma'am" — just use "you".
 - Keep each response under 2-3 sentences. Be concise.
 
 ## CRITICAL: FILLER LINES BEFORE TOOLS
-You MUST speak a filler line OUT LOUD before every tool call — no exceptions.
-
+Speak a brief filler naturally before every tool call to keep the user engaged.
 Filler lines for this persona:
 - Before get_schedule         → "{filler_schedule}"
 - Before get_available_slots  → "{filler_slots}"
 - Before book_appointment     → "{filler_book}"
+Example: "{filler_schedule} [Tool Call: get_schedule]"
+Keep it smooth and professional.
 
 # Current Date & Time
 Today's current date and time is: {now}
@@ -525,6 +553,8 @@ ALWAYS use this as your only reference for:
 - Validating that patient's chosen date is NOT more than 7 days from today
 - Passing correct YYYY-MM-DD dates to tools
 NEVER guess or assume any date.
+
+{schedule_block}
 
 # Booking Window Rule — CRITICAL
 - Appointments can ONLY be booked from TODAY up to 7 days ahead.
@@ -598,9 +628,8 @@ All passed →
 
 ## Step 7 — Full confirmation before booking
 "{confirm_opener} — I'll book an appointment for [name] on [date] at [time]. Is that correct?"
-Wait for an EXPLICIT YES. Do NOT book on vague replies.
-
-## Step 8 — Book appointment
+Wait for user confirmation (e.g., 'Yes', 'Correct', 'Go ahead', 'Confirm it').
+Step 8 — Book appointment IMMEDIATELY once they confirm.
 Only after explicit YES:
 1. Speak: "{filler_book}"
 2. Call **book_appointment**.
@@ -628,8 +657,8 @@ Only after explicit YES:
 - Do NOT give medical advice or diagnose anything.
 - Do NOT offer days where is_active: false — ever.
 - Do NOT allow bookings beyond 7 days or in the past.
-- Do NOT call book_appointment without explicit YES.
-- Do NOT skip filler lines while tools run.
+- Do NOT call book_appointment without user confirmation.
+- Keep the conversation moving — do not repeat yourself unnecessarily.
 - Do NOT ask all details at once — one question at a time.
 - Do NOT pass incomplete email (without @) to book_appointment.
 - Do NOT assume @gmail.com — confirm with patient first.
@@ -686,8 +715,6 @@ Never skip. Never reverse. Never book without verbal confirmation.
 # Tool definitions
 # ---------------------------------------------------------------------------
 
-BASE_URL = os.getenv("API_BASE_URL", "https://web-production-00424.up.railway.app")
-
 TOOLS = [
     types.Tool(
         function_declarations=[
@@ -696,7 +723,7 @@ TOOLS = [
                 description=(
                     "Fetch the full weekly schedule of the practice. "
                     "Returns each day with is_active (bool), start_time, end_time, and slot_duration. "
-                    "Call this immediately after greeting — before asking anything else."
+                    "\n**Invocation Condition:** Invoke this tool immediately after the customer mentions an appointment or scheduling request. This must be the first tool called in any scheduling flow."
                 ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
@@ -708,8 +735,7 @@ TOOLS = [
                 name="get_available_slots",
                 description=(
                     "Fetch available appointment slots for a specific date. "
-                    "Only call after validating the date is not in the past, "
-                    "within 7 days, and is an open day (is_active: true)."
+                    "\n**Invocation Condition:** Invoke this tool only after validating the date is not in the past, is within 7 days from today, and is an open day (is_active: true) according to get_schedule. Must be called before book_appointment."
                 ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
@@ -726,7 +752,7 @@ TOOLS = [
                 name="book_appointment",
                 description=(
                     "Book an appointment after the patient has verbally confirmed all details. "
-                    "Never call without explicit YES from the patient."
+                    "\n**Invocation Condition:** Invoke this tool *only after* the patient has explicitly confirmed (said 'YES') to a specific date and time, and all personal details (name, phone, email) have been collected and verified."
                 ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
@@ -748,37 +774,162 @@ TOOLS = [
 
 
 # ---------------------------------------------------------------------------
-# Tool executor
+# Tool executor — calls Django ORM directly (no HTTP)
 # ---------------------------------------------------------------------------
 
 async def execute_tool(tool_name: str, tool_args: dict) -> dict:
-    import aiohttp
-    base = os.getenv("API_BASE_URL", "https://web-production-00424.up.railway.app")
+    import logging
+    import zoneinfo
+    import threading
+    from datetime import datetime, timedelta, date as date_cls
+    from asgiref.sync import sync_to_async
+    from appointment.models import Schedule, Appointment
+    from appointment.serializers import ScheduleSerializer, AppointmentSerializer
+
+    logger = logging.getLogger(__name__)
+    pk_tz = zoneinfo.ZoneInfo("Asia/Karachi")
 
     try:
-        async with aiohttp.ClientSession() as http:
-            if tool_name == "get_schedule":
-                async with http.get(f"{base}/appointment/schedule/") as resp:
-                    body = await resp.json()
-                    if resp.status >= 400:
-                        return {"error": True, "status": resp.status, "details": body}
-                    return body
+        if tool_name == "get_schedule":
+            schedules = await sync_to_async(
+                lambda: list(Schedule.objects.all())
+            )()
+            data = ScheduleSerializer(schedules, many=True).data
+            return {"success": True, "data": data}
 
-            elif tool_name == "get_available_slots":
-                async with http.get(f"{base}/appointment/slots/", params={"date": tool_args.get("date", "")}) as resp:
-                    body = await resp.json()
-                    if resp.status >= 400:
-                        return {"error": True, "status": resp.status, "details": body}
-                    return body
+        elif tool_name == "get_available_slots":
+            date_str = tool_args.get("date", "")
+            if not date_str:
+                return {"error": "Date parameter is required. Use format YYYY-MM-DD"}
 
-            elif tool_name == "book_appointment":
-                async with http.post(f"{base}/appointment/create/", json=tool_args) as resp:
-                    body = await resp.json()
-                    if resp.status >= 400:
-                        return {"error": True, "status": resp.status, "details": body}
-                    return body
+            try:
+                date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return {"error": "Invalid date format. Use YYYY-MM-DD"}
 
-            else:
-                return {"error": f"Unknown tool: {tool_name}"}
+            if date < date_cls.today():
+                return {"error": "Date cannot be in the past."}
+
+            day_of_week = date.weekday()
+            schedule = await sync_to_async(
+                lambda: Schedule.objects.filter(day_of_week=day_of_week, is_active=True).first()
+            )()
+            if not schedule:
+                return {"error": "No schedule available for this day"}
+
+            all_slots = []
+            current = datetime.combine(date, schedule.start_time)
+            end = datetime.combine(date, schedule.end_time)
+            while current + timedelta(minutes=schedule.slot_duration) <= end:
+                slot_end = current + timedelta(minutes=schedule.slot_duration)
+                all_slots.append({
+                    "start": current.strftime("%H:%M"),
+                    "end": slot_end.strftime("%H:%M"),
+                })
+                current += timedelta(minutes=schedule.slot_duration)
+
+            booked_qs = await sync_to_async(
+                lambda: list(
+                    Appointment.objects.filter(
+                        date=date, status__in=["pending", "confirmed"]
+                    ).values_list("start_time", flat=True)
+                )
+            )()
+            booked_times = [t.strftime("%H:%M") for t in booked_qs]
+
+            now_pk = datetime.now(pk_tz)
+            is_today = date == now_pk.date()
+            available_slots = [
+                slot for slot in all_slots
+                if slot["start"] not in booked_times
+                and (not is_today or slot["start"] > now_pk.strftime("%H:%M"))
+            ]
+
+            day_display = await sync_to_async(schedule.get_day_of_week_display)()
+            return {
+                "date": date_str,
+                "day": day_display,
+                "slot_duration": f"{schedule.slot_duration} mins",
+                "total_slots": len(all_slots),
+                "booked_slots": len(booked_times),
+                "available_slots": len(available_slots),
+                "slots": available_slots,
+            }
+
+        elif tool_name == "book_appointment":
+            date_str = tool_args.get("date")
+            start_time_str = tool_args.get("start_time")
+            phone = tool_args.get("phone")
+
+            if date_str and start_time_str and phone:
+                existing = await sync_to_async(
+                    lambda: Appointment.objects.filter(
+                        date=date_str, start_time=start_time_str, phone=phone
+                    ).first()
+                )()
+                if existing:
+                    return AppointmentSerializer(existing).data
+
+            serializer = AppointmentSerializer(data=tool_args)
+            is_valid = await sync_to_async(serializer.is_valid)()
+            if not is_valid:
+                return {"error": True, "details": serializer.errors}
+
+            appointment_date = serializer.validated_data.get("date")
+            start_time = serializer.validated_data.get("start_time")
+            end_time = serializer.validated_data.get("end_time")
+
+            now_pk = datetime.now(pk_tz)
+
+            if appointment_date < date_cls.today():
+                return {"error": True, "message": "Appointment date cannot be in the past."}
+
+            if appointment_date == now_pk.date() and start_time <= now_pk.time():
+                return {
+                    "error": True,
+                    "message": f"Cannot book {start_time.strftime('%H:%M')} today — it is already {now_pk.strftime('%H:%M')}.",
+                }
+
+            overlap = await sync_to_async(
+                lambda: Appointment.objects.filter(
+                    date=appointment_date,
+                    status__in=["pending", "confirmed"],
+                    start_time__lt=end_time,
+                    end_time__gt=start_time,
+                ).exists()
+            )()
+            if overlap:
+                return {"error": True, "message": "Time slot not available — conflicts with an existing appointment."}
+
+            appointment = await sync_to_async(serializer.save)()
+
+            def _background_tasks(appt_id):
+                try:
+                    from appointment.models import Appointment as Appt
+                    from appointment.services.google_calender import create_meeting
+                    from appointment.services.email_service import send_appointment_email
+                    appt = Appt.objects.get(id=appt_id)
+                    try:
+                        cal = create_meeting(appt)
+                        appt.google_event_id = cal["event_id"]
+                        appt.meet_link = cal["meet_link"]
+                        appt.calendar_link = cal["calendar_link"]
+                        appt.save()
+                    except Exception as ce:
+                        logger.error(f"Background Calendar error: {ce}")
+                    try:
+                        send_appointment_email(appt)
+                    except Exception as ee:
+                        logger.error(f"Background Email error: {ee}")
+                except Exception as e:
+                    logger.error(f"Background task error: {e}")
+
+            threading.Thread(target=_background_tasks, args=(appointment.id,), daemon=True).start()
+            return AppointmentSerializer(appointment).data
+
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+
     except Exception as e:
+        logger.error(f"Tool execution error [{tool_name}]: {e}")
         return {"error": str(e)}
