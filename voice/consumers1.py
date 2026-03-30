@@ -530,8 +530,10 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=False,
-                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
-                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    # LOW start sensitivity = ignore background noise, only react to clear speech
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                    # LOW end sensitivity = allow natural pauses without cutting off mid-sentence
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
                 )
             ),
         )
