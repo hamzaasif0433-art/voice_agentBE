@@ -77,7 +77,8 @@ INSTALLED_APPS = [
     "menu",
     "Analytics",
     "appointment",
-    'voice'
+    'voice',
+    'whatsapp',
 ]
 EMAIL_BACKEND    = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST       = 'smtp.gmail.com'
@@ -179,6 +180,7 @@ CSRF_TRUSTED_ORIGINS = [
     'http://localhost:*',
     'http://127.0.0.1:*',
     'https://*.elevenlabs.io',
+    'https://*.green-api.com',
 ]
 
 # Exempt API endpoints from CSRF for external webhooks
@@ -192,6 +194,10 @@ ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
 ELEVENLABS_AGENT_ID = os.getenv('ELEVENLABS_AGENT_ID') or os.getenv('AGENT_ID')
 ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GROQ_API_KEY = os.getenv('GROQ_API_KEY') 
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 DEEPGRAM_API_KEY = os.getenv('DEEPGRAM_API_KEY')
+
+# Green API (WhatsApp Bot)
+GREENAPI_INSTANCE_ID = os.getenv('GREENAPI_INSTANCE_ID')
+GREENAPI_API_TOKEN = os.getenv('GREENAPI_API_TOKEN')
 

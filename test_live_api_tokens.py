@@ -1,9 +1,13 @@
 import asyncio
 import os
+import truststore
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 import warnings
 warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.DEBUG)
+truststore.inject_into_ssl()
 
 _kfc_api_dir = Path(__file__).resolve().parent
 _env_file = _kfc_api_dir / ".env"
@@ -16,22 +20,9 @@ from google import genai
 from google.genai import types
 
 async def main():
-    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not service_account_json:
-        raise EnvironmentError("GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set.")
-    sa_info = json.loads(service_account_json)
-    credentials = service_account.Credentials.from_service_account_info(
-        sa_info,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
-    _proj = os.getenv("VERTEX_PROJECT", "").strip()
-    _loc = os.getenv("VERTEX_LOCATION", "europe-west4").strip()
-    vertexai.init(
-        project=_proj,
-        location=_loc,
-        credentials=credentials,
-    )
-    client = genai.Client(vertexai=True, project=_proj, location=_loc)
+    # Use Direct Google AI Studio API for Gemini 3.1 Flash Live Preview
+    _api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    client = genai.Client(api_key=_api_key)
     
     live_config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
@@ -39,7 +30,9 @@ async def main():
     )
 
     try:
-        async with client.aio.live.connect(model="gemini-2.5-flash-native-audio-preview-12-2025", config=live_config) as session:
+        # Use the correct 3.1 Live identifier for AI Studio
+        async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=live_config) as session:
+            print("[TEST] Connected to Gemini 3.1 Flash Live Preview!", flush=True)
             await session.send_realtime_input(text="Hi.")
             count = 0
             async for response in session.receive():

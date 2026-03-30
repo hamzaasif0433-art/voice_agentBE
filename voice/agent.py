@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 
 # ── BACKEND URL ───────────────────────────────────────────────────────
 BACKEND_URL = "http://localhost:8000"

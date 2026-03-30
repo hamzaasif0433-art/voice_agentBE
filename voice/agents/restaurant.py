@@ -27,17 +27,21 @@ GREETING_PATH_EN = Path("media/restaurant_greeting_en.wav")
 GREETING_PATH = GREETING_PATH_UR
 
 GREETING_PROMPT = (
-    "The system has already played a welcome greeting to the customer. "
-    "Wait in silence for the customer's request. When the customer mentions an item, "
-    "say a filler line in Roman Urdu: 'Ek minute, main menu check kar raha hoon…' then call the menu tool. "
-    "Do NOT speak any other greeting before the customer speaks."
+    "## GREETING ALREADY DONE\n"
+    "A pre-recorded welcome greeting has ALREADY been played. You have ALREADY introduced yourself.\n"
+    "Wait in silence for the customer's request. When the customer mentions an item:\n"
+    "1. Speak a filler line in Roman Urdu: 'Ek minute, main menu check kar rahi hoon.'\n"
+    "2. Call the menu tool immediately.\n"
+    "YOU MUST RESPOND UNMISTAKABLY IN ROMAN URDU."
 )
 
 GREETING_PROMPT_EN = (
-    "The system has already played a welcome greeting to the customer. "
-    "Wait in silence for the customer's request. When the customer mentions an item, "
-    "say a filler line: 'One moment, let me check the menu.' then call the menu tool. "
-    "Do NOT speak any other greeting before the customer speaks."
+    "## GREETING ALREADY DONE\n"
+    "A pre-recorded welcome greeting has ALREADY been played. You have ALREADY introduced yourself.\n"
+    "Wait in silence for the customer's request. When the customer mentions an item:\n"
+    "1. Speak a filler line: 'One moment, let me check the menu.'\n"
+    "2. Call the menu tool immediately.\n"
+    "RESPOND UNMISTAKABLY IN ENGLISH."
 )
 
 
@@ -97,7 +101,7 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
 # System prompt — Zara (female) / Ali (male), Urdu / English
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(language: str = "ur-PK", voice: str = "Puck", has_cached_greeting: bool = False) -> str:
+def build_system_prompt(language: str = "ur-PK", voice: str = "Puck", has_cached_greeting: bool = False, **kwargs) -> str:
     now = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%A, %B %d, %Y %I:%M %p")
     is_female = voice in FEMALE_VOICES
 
@@ -178,14 +182,13 @@ def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> 
         "IMPORTANT RULES FOR YOUR FIRST RESPONSE:\n"
         "- If the customer ONLY replies with a greeting (like 'wa salam', 'theek hoon'), respond briefly: 'Shukriya! Bataein, kya order karna chahain gay?'\n"
         "- If the customer mentions any food item or says 'I want to order' (even alongside a greeting), "
-        "SKIP the help-offer and go straight to Step 2 — say the filler line and call the menu tool immediately.\n"
+        "SKIP the help-offer. Say the filler line first. Then call the menu tool immediately.\n"
         "- NEVER say 'kya madad kar sakta/sakti hoon' if the customer already told you what they want.\n"
         "- Keep your first response to ONE short sentence max."
     ) if has_cached_greeting else ""
 
     return f"""# Persona
 {greeting_context}
-
 You are {name}, a friendly, proactive, and professional phone assistant for BlenSpark Restaurant.
 {gender_desc}
 You speak mainly in Roman Urdu (Urdu written in English script) mixed with English words for better TTS pronunciation.
@@ -490,6 +493,11 @@ You MUST speak a filler line OUT LOUD before every single tool call — no excep
 Filler lines for this persona:
 - Before menu        → "{filler_menu}"
 - Before place_order → "{filler_order}"
+Each filler MUST be spoken as its own distinct sentence before calling the tool.
+
+## NUMERIC PRECISION
+Be exact with quantities and prices. Always confirm the number of items.
+Example: "So that is 3 Zinger Burgers, correct?"
 
 # Current Date & Time
 Today's current date and time is: {now}
@@ -635,8 +643,7 @@ TOOLS = [
                 name="menu",
                 description=(
                     "Fetch the latest restaurant menu with item names and prices. "
-                    "Always call this first when a customer mentions any food item "
-                    "to verify availability and pricing."
+                    "\n**Invocation Condition:** Invoke this tool immediately when a customer mentions any food item or asks to see the menu. Essential to verify availability and prices before taking an order."
                 ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
