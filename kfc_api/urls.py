@@ -6,4 +6,5 @@ urlpatterns = [
     path("", include("menu.urls")),
     path("appointment/", include("appointment.urls")),
     path("voice/", include("voice.urls")),
+    path("whatsapp/", include("whatsapp.urls")),
 ]
