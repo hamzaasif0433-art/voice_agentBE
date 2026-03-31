@@ -75,7 +75,8 @@ SIP_RATE = 8000
 MIC_RATE = 16000
 OUT_RATE = 24000
 
-GREETING_PATH = Path("media/sara_greeting.wav")
+from django.conf import settings
+GREETING_PATH = settings.BASE_DIR / "media/sara_greeting.wav"
 
 GREETING_PROMPT = (
     "The system has already played a welcome greeting to the user. "
@@ -563,6 +564,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             # We explicitly do NOT send a user text message here, because doing so
             # forces Gemini Live to generate a verbal text/audio response immediately.
             # The context is now provided via system_instruction!
+        else:
             # Ask model to greet the user warmly via realtime input
             generate_prompt = self._get_generate_greeting_prompt()
             print("[WS] No greeting file — asking Gemini to generate greeting", flush=True)

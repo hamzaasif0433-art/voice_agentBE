@@ -26,7 +26,7 @@ from whatsapp.ai_agent import generate_reply
 
 log = logging.getLogger(__name__)
 
-# ── Lazy-initialized Gemini client ─────────────────────────────────────────────
+# ── Lazy-initialized clients ──────────────────────────────────────────────────
 _gemini_client = None
 
 
@@ -91,6 +91,90 @@ def show_typing(chat_id: str, duration: int = 5):
         }, timeout=10)
     except Exception as e:
         log.warning("Typing indicator error: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Text-to-Speech using Google Cloud Text-to-Speech API (Best for Urdu)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Lazy-initialized TTS client
+_tts_client = None
+
+
+def _get_tts_client():
+    """Get Google Cloud Text-to-Speech client."""
+    global _tts_client
+    if _tts_client is None:
+        from google.cloud import texttospeech
+        _tts_client = texttospeech.TextToSpeechClient()
+    return _tts_client
+
+
+def synthesize_voice_sana(text: str, language: str = "ur-PK") -> bytes:
+    """
+    Synthesize speech using Google Cloud TTS with female Sana voice.
+    Returns audio bytes in OGG/Opus format for WhatsApp.
+    """
+    from google.cloud import texttospeech
+
+    client = _get_tts_client()
+
+    # Voice configuration - Female voice optimized for Urdu/English
+    # ur-PK-Wavenet-A: Female Urdu voice (best quality)
+    # en-US-Neural2-F: Female English voice
+    if language == "en-US":
+        voice_name = "en-US-Neural2-F"
+    else:
+        voice_name = "ur-PK-Wavenet-A"  # Best female Urdu voice
+
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    voice = texttospeech.VoiceSelectionParams(
+        language_code=language,
+        name=voice_name,
+        ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
+    )
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.OGG_OPUS,
+        speaking_rate=1.0,
+        pitch=0.0
+    )
+
+    try:
+        response = client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config
+        )
+        return response.audio_content
+    except Exception as e:
+        log.error("TTS synthesis error: %s", e)
+        return b""
+
+
+def send_voice_message(chat_id: str, audio_bytes: bytes):
+    """Send a voice note via Green API."""
+    try:
+        _, api_token, base_url = _get_green_api_config()
+        url = f"{base_url}/sendFileByUpload/{api_token}"
+
+        # Save to temporary file for upload
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
+        try:
+            with open(tmp_path, "rb") as f:
+                files = {"file": ("voice.ogg", f, "audio/ogg")}
+                data = {"chatId": chat_id}
+                resp = requests.post(url, files=files, data=data, timeout=30)
+            log.info("Voice sent to %s (status=%d)", chat_id, resp.status_code)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    except Exception as e:
+        log.error("Send voice error: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,12 +290,13 @@ def send_appointment_confirmation(chat_id: str, booking: dict):
 # Main Webhook Handler (called from Django view)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def handle_webhook(body: dict):
+def handle_webhook(body: dict, reply_with_voice: bool = True):
     """
     Process a Green API webhook payload.
     Called from the Django view in a background thread.
 
     body: the full JSON body from Green API's webhook POST.
+    reply_with_voice: If True and user sent voice, reply with voice.
     """
     try:
         type_webhook = body.get("typeWebhook", "")
@@ -234,6 +319,7 @@ def handle_webhook(body: dict):
         # ── Determine message type and extract text ──────────────────────
         type_message = message_data.get("typeMessage", "")
         user_message = ""
+        is_voice_input = False
 
         if type_message == "textMessage":
             user_message = message_data.get("textMessageData", {}).get("textMessage", "")
@@ -242,6 +328,7 @@ def handle_webhook(body: dict):
             user_message = message_data.get("extendedTextMessageData", {}).get("text", "")
 
         elif type_message == "audioMessage":
+            is_voice_input = True
             download_url = message_data.get("fileMessageData", {}).get("downloadUrl", "")
             if not download_url:
                 send_message(chat_id, "Voice note samajh nahi aayi. Please text message bhejein. 📝")
@@ -257,17 +344,24 @@ def handle_webhook(body: dict):
         if not user_message.strip():
             return
 
-        log.info("WhatsApp from %s: %s", chat_id, user_message)
+        log.info("WhatsApp from %s (voice=%s): %s", chat_id, is_voice_input, user_message)
 
         # ── Check office hours ───────────────────────────────────────────
         if not is_office_hours():
-            send_message(
-                chat_id,
+            msg = (
                 "Thank you for contacting BlenSpark! 🍔\n\n"
                 "We are currently closed.\n"
                 "Hours: 9 AM - 1 AM PKT\n\n"
                 "Please message again during business hours."
             )
+            if is_voice_input and reply_with_voice:
+                audio = synthesize_voice_sana(msg, "en-US")
+                if audio:
+                    send_voice_message(chat_id, audio)
+                else:
+                    send_message(chat_id, msg)
+            else:
+                send_message(chat_id, msg)
             return
 
         # ── Mark as seen + typing ────────────────────────────────────────
@@ -278,8 +372,23 @@ def handle_webhook(body: dict):
         client = _get_gemini_client()
         reply, result_data, result_type = generate_reply(chat_id, user_message, client)
 
-        # ── Send reply ───────────────────────────────────────────────────
-        send_message(chat_id, reply)
+        # ── Send reply (voice if user sent voice, else text) ──────────────
+        if is_voice_input and reply_with_voice:
+            # Detect language for voice reply
+            # Simple heuristic: if reply contains mostly English characters, use English voice
+            english_ratio = sum(1 for c in reply if c.isascii()) / max(len(reply), 1)
+            voice_lang = "en-US" if english_ratio > 0.7 else "ur-PK"
+
+            audio = synthesize_voice_sana(reply, voice_lang)
+            if audio:
+                send_voice_message(chat_id, audio)
+                log.info("Voice reply sent to %s", chat_id)
+            else:
+                # Fallback to text if TTS fails
+                send_message(chat_id, reply)
+        else:
+            send_message(chat_id, reply)
+
         log.info("Replied to %s", chat_id)
 
         # ── Send confirmation if transaction was completed ───────────────

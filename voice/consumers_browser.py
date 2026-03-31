@@ -179,7 +179,8 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
 
     async def disconnect(self, close_code):
         if hasattr(self, '_debug_mic_buffer') and len(self._debug_mic_buffer) > 0:
-            debug_path = Path("media/debug_mic.wav")
+            from django.conf import settings
+            debug_path = settings.BASE_DIR / "media/debug_mic.wav"
             _save_wav(bytes(self._debug_mic_buffer), debug_path, MIC_RATE)
             # print(f"[BrowserWS] Saved {len(self._debug_mic_buffer)} bytes of microphone audio to {debug_path}")
         await super().disconnect(close_code)
