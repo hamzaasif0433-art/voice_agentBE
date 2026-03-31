@@ -366,6 +366,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._current_agent_turn = ""
         self._should_end_call  = False
         self._last_session_handle = None
+        self._booking_state = ""  # Tracks appointment/order booking status (e.g., "booked", "confirmed")
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle
@@ -585,6 +586,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
     async def _receive_loop(self, session):
         greeting_buffer = bytearray()
+        self._pending_tool_calls = 0  # Track pending tool calls
 
         try:
             while not self._disconnecting:
@@ -654,6 +656,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
                     tool_call = getattr(response, "tool_call", None)
                     if tool_call:
+                        self._pending_tool_calls += len(tool_call.function_calls)
                         function_responses = []
                         for fc in tool_call.function_calls:
                             tool_name = fc.name
@@ -682,10 +685,13 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             await session.send_tool_response(
                                 function_responses=function_responses
                             )
+                            self._pending_tool_calls = 0  # Tool calls completed
                             print(f"[WS] Successfully sent tool responses for {len(function_responses)} calls", flush=True)
                         except Exception as e:
+                            self._pending_tool_calls = 0
                             print(f">>> [WS ERROR] Failed to send tool response to Gemini: {repr(e)}", flush=True)
-                        # REMOVED: continue — Gemini 3.1 can send tool responses + server_content in one event
+                        # Continue to wait for Gemini's response after tool results
+                        continue
 
                     sc = getattr(response, "server_content", None)
                     if sc is None:

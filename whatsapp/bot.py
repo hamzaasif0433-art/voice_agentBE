@@ -94,60 +94,82 @@ def show_typing(chat_id: str, duration: int = 5):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Text-to-Speech using Google Cloud Text-to-Speech API (Best for Urdu)
+# Text-to-Speech using Gemini Live API (Vertex AI GenAI SDK)
+# Uses existing Vertex AI authentication - no extra quota project needed
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Lazy-initialized TTS client
-_tts_client = None
+async def synthesize_voice_sana_async(text: str, language: str = "ur-PK") -> bytes:
+    """
+    Synthesize speech using Gemini Live API with Vertex AI.
+    Returns audio bytes in WAV format.
+    """
+    from google.genai import types
+    import io
+    import wave
 
+    client = _get_gemini_client()
 
-def _get_tts_client():
-    """Get Google Cloud Text-to-Speech client."""
-    global _tts_client
-    if _tts_client is None:
-        from google.cloud import texttospeech
-        _tts_client = texttospeech.TextToSpeechClient()
-    return _tts_client
+    # Female voice configuration
+    voice_name = "Aoede"  # Female voice (Aoede, Kore, or Leda)
+
+    # Audio buffer to collect response (PCM data)
+    pcm_buffer = bytearray()
+
+    try:
+        # Connect to Gemini Live API for TTS
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+                )
+            ),
+        )
+
+        async with client.aio.live.connect(model="gemini-live-2.5-flash-native-audio", config=config) as session:
+            # Send text for TTS
+            await session.send_client_content(
+                turns={"role": "user", "parts": [{"text": text}]}
+            )
+
+            # Collect audio response
+            async for response in session.receive():
+                server_content = getattr(response, "server_content", None)
+                if server_content and getattr(server_content, "model_turn", None):
+                    for part in server_content.model_turn.parts:
+                        inline_data = getattr(part, "inline_data", None)
+                        if inline_data and inline_data.data:
+                            pcm_buffer.extend(inline_data.data)
+
+                # Check if turn is complete
+                if getattr(server_content, "turn_complete", False):
+                    break
+
+        # Wrap PCM data in WAV header (24kHz, 16-bit, mono)
+        if not pcm_buffer:
+            return b""
+
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)  # Mono
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(24000)  # 24kHz
+            wav_file.writeframes(bytes(pcm_buffer))
+
+        return wav_buffer.getvalue()
+
+    except Exception as e:
+        log.error("TTS synthesis error: %s", e)
+        return b""
 
 
 def synthesize_voice_sana(text: str, language: str = "ur-PK") -> bytes:
-    """
-    Synthesize speech using Google Cloud TTS with female Sana voice.
-    Returns audio bytes in OGG/Opus format for WhatsApp.
-    """
-    from google.cloud import texttospeech
-
-    client = _get_tts_client()
-
-    # Voice configuration - Female voice optimized for Urdu/English
-    # ur-PK-Wavenet-A: Female Urdu voice (best quality)
-    # en-US-Neural2-F: Female English voice
-    if language == "en-US":
-        voice_name = "en-US-Neural2-F"
-    else:
-        voice_name = "ur-PK-Wavenet-A"  # Best female Urdu voice
-
-    synthesis_input = texttospeech.SynthesisInput(text=text)
-    voice = texttospeech.VoiceSelectionParams(
-        language_code=language,
-        name=voice_name,
-        ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
-    )
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.OGG_OPUS,
-        speaking_rate=1.0,
-        pitch=0.0
-    )
-
+    """Synchronous wrapper for async TTS."""
+    import asyncio
     try:
-        response = client.synthesize_speech(
-            input=synthesis_input,
-            voice=voice,
-            audio_config=audio_config
-        )
-        return response.audio_content
+        return asyncio.run(synthesize_voice_sana_async(text, language))
     except Exception as e:
-        log.error("TTS synthesis error: %s", e)
+        log.error("TTS run error: %s", e)
         return b""
 
 
@@ -157,14 +179,15 @@ def send_voice_message(chat_id: str, audio_bytes: bytes):
         _, api_token, base_url = _get_green_api_config()
         url = f"{base_url}/sendFileByUpload/{api_token}"
 
-        # Save to temporary file for upload
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        # Save WAV to temporary file for upload
+        # Green API accepts WAV files directly
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
 
         try:
             with open(tmp_path, "rb") as f:
-                files = {"file": ("voice.ogg", f, "audio/ogg")}
+                files = {"file": ("voice.wav", f, "audio/wav")}
                 data = {"chatId": chat_id}
                 resp = requests.post(url, files=files, data=data, timeout=30)
             log.info("Voice sent to %s (status=%d)", chat_id, resp.status_code)

@@ -255,16 +255,25 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                     # ── Tool call handling ──────────────────────────────────
                     tool_call = getattr(response, "tool_call", None)
                     if tool_call:
+                        self._pending_tool_calls += len(tool_call.function_calls)
                         # Before tool call, save any pending agent turn to history
                         if self._current_agent_turn:
                             self._call_history.append({"role": "agent", "text": self._current_agent_turn})
                             self._current_agent_turn = ""
-                        
+
                         function_responses = []
                         for fc in tool_call.function_calls:
                             tool_name = fc.name
                             tool_args = dict(fc.args) if fc.args else {}
                             print(f"[BrowserWS] [Tool Call] {tool_name}({tool_args})", flush=True)
+
+                            # Track if this is the booking/placing call
+                            if tool_name == "book_appointment":
+                                self._booking_state = "booked"
+                                print(f"[BrowserWS] book_appointment tool called - marking as booked", flush=True)
+                            elif tool_name == "place_order":
+                                self._booking_state = "booked"
+                                print(f"[BrowserWS] place_order tool called - marking as booked", flush=True)
 
                             result = await self._execute_tool(tool_name, tool_args)
                             print(f"[BrowserWS] [Tool Result] {tool_name} → {result}", flush=True)
@@ -279,10 +288,13 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
 
                         try:
                             await session.send_tool_response(function_responses=function_responses)
+                            self._pending_tool_calls = 0  # Tool calls completed
                             print(f"[BrowserWS] Successfully sent tool responses for {len(function_responses)} calls", flush=True)
                         except Exception as e:
+                            self._pending_tool_calls = 0
                             print(f">>> [BrowserWS ERROR] Failed to send tool response: {repr(e)}", flush=True)
-                        # REMOVED: continue — Gemini 3.1 can send tool responses + server_content in one event
+                        # Continue to wait for Gemini's response after tool results
+                        continue
 
                     # ── Audio + transcription handling ──────────────────────
                     sc = getattr(response, "server_content", None)
@@ -335,9 +347,30 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                         if self._current_agent_turn:
                             self._call_history.append({"role": "agent", "text": self._current_agent_turn.strip()})
                             idx = self._current_agent_turn.lower()
-                            if "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx:
-                                print(f"[BrowserWS] Detected goodbye — scheduling disconnect.", flush=True)
-                                self._should_end_call = True
+
+                            # Check if goodbye was said
+                            goodbye_detected = "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx
+
+                            # Check if book_appointment was ever called
+                            book_appointment_called = any(
+                                h.get("tool_name") == "book_appointment"
+                                for h in self._call_history
+                            )
+                            place_order_called = any(
+                                h.get("tool_name") == "place_order"
+                                for h in self._call_history
+                            )
+                            has_confirmed = self._booking_state == "confirmed"
+
+                            if goodbye_detected:
+                                if self._pending_tool_calls > 0:
+                                    print(f"[BrowserWS] Model said goodbye but {self._pending_tool_calls} tool call(s) pending — NOT disconnecting.", flush=True)
+                                elif has_confirmed and not book_appointment_called and not place_order_called:
+                                    print(f"[BrowserWS] CRITICAL: User confirmed but book_appointment/place_order was NEVER called! Blocking disconnect.", flush=True)
+                                    self._should_end_call = False
+                                else:
+                                    print(f"[BrowserWS] Detected goodbye — scheduling disconnect.", flush=True)
+                                    self._should_end_call = True
                             self._current_agent_turn = ""
 
                         if self._should_end_call:
