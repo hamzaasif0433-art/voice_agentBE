@@ -100,7 +100,7 @@ def show_typing(chat_id: str, duration: int = 5):
 
 async def synthesize_voice_sana_async(text: str, language: str = "ur-PK") -> bytes:
     """
-    Synthesize speech using Gemini Live API with Vertex AI.
+    Synthesize speech using Gemini TTS API.
     Returns audio bytes in WAV format.
     """
     from google.genai import types
@@ -112,49 +112,33 @@ async def synthesize_voice_sana_async(text: str, language: str = "ur-PK") -> byt
     # Female voice configuration
     voice_name = "Aoede"  # Female voice (Aoede, Kore, or Leda)
 
-    # Audio buffer to collect response (PCM data)
-    pcm_buffer = bytearray()
-
     try:
-        # Connect to Gemini Live API for TTS
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
-                )
+        # Generate audio using generate_content API
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=text,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice_name,
+                        )
+                    )
+                ),
             ),
         )
 
-        async with client.aio.live.connect(model="gemini-live-2.5-flash-native-audio", config=config) as session:
-            # Send text for TTS
-            await session.send_client_content(
-                turns={"role": "user", "parts": [{"text": text}]}
-            )
-
-            # Collect audio response
-            async for response in session.receive():
-                server_content = getattr(response, "server_content", None)
-                if server_content and getattr(server_content, "model_turn", None):
-                    for part in server_content.model_turn.parts:
-                        inline_data = getattr(part, "inline_data", None)
-                        if inline_data and inline_data.data:
-                            pcm_buffer.extend(inline_data.data)
-
-                # Check if turn is complete
-                if getattr(server_content, "turn_complete", False):
-                    break
+        # Extract audio data
+        pcm_data = response.candidates[0].content.parts[0].inline_data.data
 
         # Wrap PCM data in WAV header (24kHz, 16-bit, mono)
-        if not pcm_buffer:
-            return b""
-
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav_file:
             wav_file.setnchannels(1)  # Mono
             wav_file.setsampwidth(2)  # 16-bit
             wav_file.setframerate(24000)  # 24kHz
-            wav_file.writeframes(bytes(pcm_buffer))
+            wav_file.writeframes(pcm_data)
 
         return wav_buffer.getvalue()
 
@@ -189,7 +173,7 @@ def send_voice_message(chat_id: str, audio_bytes: bytes):
             with open(tmp_path, "rb") as f:
                 files = {"file": ("voice.wav", f, "audio/wav")}
                 data = {"chatId": chat_id}
-                resp = requests.post(url, files=files, data=data, timeout=30)
+                resp = requests.post(url, files=files, data=data, timeout=(10, 120))
             log.info("Voice sent to %s (status=%d)", chat_id, resp.status_code)
         finally:
             try:

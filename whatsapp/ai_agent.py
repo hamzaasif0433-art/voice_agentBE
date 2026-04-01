@@ -155,6 +155,9 @@ def generate_reply(phone: str, user_message: str, client: genai.Client) -> tuple
 
         raw_reply = response.text.strip()
 
+        # DEBUG: Log raw LLM response
+        log.info("DEBUG LLM raw_reply: %s", raw_reply[:200] if raw_reply else "EMPTY")
+
         # ── Check for ROUTER dispatch ──────────────────────────────────────
         if "ROUTE|restaurant" in raw_reply:
             log.info("Dispatching %s to Restaurant agent", phone)
