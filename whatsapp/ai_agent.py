@@ -34,7 +34,7 @@ conversation_history: dict[str, list] = {}
 user_context: dict[str, str] = {}  # stores "router", "restaurant", or "healthcare"
 
 MAX_HISTORY = 20          # keep last N messages to stay within context limits
-MAX_TOOL_LOOPS = 3        # safety cap: how many tool calls allowed per turn
+MAX_TOOL_LOOPS = 6        # safety cap: how many tool calls allowed per turn (increased for healthcare flow)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

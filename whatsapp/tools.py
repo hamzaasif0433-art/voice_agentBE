@@ -206,7 +206,7 @@ def get_available_slots(payload: dict) -> str:
 
 
 def book_appointment(payload: dict) -> str:
-    """Book an appointment using patient_name, phone, date, start_time."""
+    """Book an appointment using patient_name, phone, date, start_time, notes."""
     required = ["patient_name", "phone", "date", "start_time"]
     for req in required:
         if not payload.get(req):
@@ -214,8 +214,8 @@ def book_appointment(payload: dict) -> str:
 
     date_str = payload.get("date")
     start_time = payload.get("start_time")
-    
-    # Simple logic to add 30 mins for end_time if needed, but often backend handles it or we pass a generic end_time
+
+    # Simple logic to add 30 mins for end_time if needed
     from datetime import datetime, timedelta
     try:
         st = datetime.strptime(start_time, "%H:%M")
@@ -223,19 +223,19 @@ def book_appointment(payload: dict) -> str:
         end_time = et.strftime("%H:%M")
     except Exception:
         end_time = start_time
-    
+
     try:
         book_url = f"{BASE_URL}/appointment/create/"
         book_payload = {
             "name": payload.get("patient_name"),
             "phone": payload.get("phone"),
-            "email": payload.get("email", "nomail@example.com"), # Needs an email for Google Meet
+            "email": payload.get("email", "nomail@example.com"),
             "date": date_str,
             "start_time": start_time,
             "end_time": end_time,
-            "notes": "WhatsApp Booking"
+            "notes": payload.get("notes", "WhatsApp Booking")  # Reason/symptoms from patient
         }
-        
+
         book_resp = requests.post(book_url, json=book_payload, timeout=15)
         if book_resp.status_code == 200 or book_resp.status_code == 201:
             return (

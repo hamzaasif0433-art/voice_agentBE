@@ -9,7 +9,7 @@ import uuid
 
 
 @csrf_exempt
-@api_view(['GET',"POST"])
+@api_view(['GET', 'POST', 'DELETE'])
 def menu(request):
     """Return the KFC menu items"""
     if request.method == "POST":
@@ -19,14 +19,42 @@ def menu(request):
             serializer.save()
             return Response({
                 "success": True,
-                "message": "Order created successfully",
-                "order": serializer.data
+                "message": "Menu item created successfully",
+                "data": serializer.data
             }, status=status.HTTP_201_CREATED)
 
         return Response({
             "success": False,
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == "DELETE":
+        menu_id = request.query_params.get('id')
+        if not menu_id:
+            return Response({
+                "success": False,
+                "message": "Menu item ID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            menu_id = int(menu_id)
+            menu_item = Menu.objects.get(id=menu_id)
+            menu_item.delete()
+            return Response({
+                "success": True,
+                "message": "Menu item deleted successfully"
+            }, status=status.HTTP_200_OK)
+        except ValueError:
+            return Response({
+                "success": False,
+                "message": "Menu item ID must be a valid number"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Menu.DoesNotExist:
+            return Response({
+                "success": False,
+                "message": "Menu item not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
     if request.method == "GET":
         data = Menu.objects.all()
         serializer = MenuSerializer(data, many=True)
