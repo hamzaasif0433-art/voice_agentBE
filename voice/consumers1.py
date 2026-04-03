@@ -367,6 +367,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._should_end_call  = False
         self._last_session_handle = None
         self._booking_state = ""  # Tracks appointment/order booking status (e.g., "booked", "confirmed")
+        self._pending_tool_calls = 0  # Track pending tool call count
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle

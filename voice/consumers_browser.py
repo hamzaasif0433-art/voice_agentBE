@@ -208,6 +208,7 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
     async def _receive_loop(self, session):
         greeting_buffer = bytearray()
         greeting_path = self._get_greeting_path()
+        self._pending_tool_calls = 0  # Ensure initialized even if parent hasn't set it
 
         try:
             while not self._disconnecting:
