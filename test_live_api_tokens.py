@@ -45,8 +45,17 @@ async def main():
                             if part.text:
                                 print("Text:", part.text)
                 
-                if hasattr(response, "usage_metadata"):
-                    print("Found usage_metadata:", dir(response.usage_metadata))
+                if hasattr(response, "usage_metadata") and response.usage_metadata:
+                        um = response.usage_metadata
+                        print(f"""
+                    ─── Token Usage ───────────────────────
+                    Prompt tokens:    {um.prompt_token_count}
+                    Response tokens:  {um.response_token_count}
+                    Thoughts tokens:  {um.thoughts_token_count}
+                    Total tokens:     {um.total_token_count}
+                    Cached tokens:    {um.cached_content_token_count}
+                    ───────────────────────────────────────
+                    """)
                 elif hasattr(sc, "usage_metadata") if sc else False:
                     print("Found sc.usage_metadata")
                 elif hasattr(response, "token_count"):

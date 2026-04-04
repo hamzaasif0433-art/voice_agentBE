@@ -5,19 +5,21 @@ __pycache__/
 *.pyd
 .Python
 *.pyc
-
+service-account.json
 # Virtual Environment
 venv/
 env/
 .env/
 .venv/
 
+.claude/
+.gemini/
+.planning/
 # Environment Variables
 .env
 .env.local
 .env.production
 *.env
-
 # Django
 *.log
 local_settings.py
@@ -33,10 +35,10 @@ static_root/
 # Google Credentials
 credentials.json
 service_account.json
-service-account.json
 appointment/services/credentials.json
 *.json.key
-
+test_live_api_tokens.py
+test_ssl.py
 # IDE
 .vscode/
 .idea/
@@ -64,3 +66,11 @@ celerybeat.pid
 # Node (if any frontend)
 node_modules/
 npm-debug.log
+
+seed_burger_menu.py
+seed_smash_burger_menu.py
+test_live_api_tokens.py
+test_ssl.py
+seed_demo_orders.py
+seed_smash_burger_menu.py
+PROJECT_CONTEXT.txt
