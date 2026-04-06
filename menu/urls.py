@@ -1,9 +1,10 @@
 from django.urls import path, include
-from .views import orders, menu, call_list, call_status
+from .views import orders, menu, categories, call_list, call_status
 from .voice_ai import get_signed_url, health_check
 from Analytics.urls import *
 urlpatterns = [
     path("menu/", menu, name="menu"),
+    path("menu/categories/", categories, name="categories"),
     path("orders/", orders, name="orders"),
     # Voice AI endpoints for secure ElevenLabs integration
     path("voice-ai/signed-url/", get_signed_url, name="get_signed_url"),

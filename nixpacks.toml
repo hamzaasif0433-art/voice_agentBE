@@ -1,0 +1,4 @@
+[providers.python]
+# Install ffmpeg system dependency via nix
+# This ensures pydub can find it for Meta voice audio conversion
+aptPkgs = ["ffmpeg"]

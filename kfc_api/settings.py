@@ -181,6 +181,14 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:*',
     'https://*.elevenlabs.io',
     'https://*.green-api.com',
+    # Meta / WhatsApp Business Cloud API
+    'https://*.facebook.com',
+    'https://*.whatsapp.com',
+    'https://*.fbcdn.net',
+    # Dev tunnel (local testing with Meta)
+    'https://*.devtunnels.ms',
+    # Railway production
+    'https://*.up.railway.app',
 ]
 
 # Exempt API endpoints from CSRF for external webhooks

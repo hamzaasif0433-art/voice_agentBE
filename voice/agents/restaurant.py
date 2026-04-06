@@ -90,8 +90,8 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
     return (
         "This is the very start of the conversation. No greeting has been played yet. "
         "You MUST speak a warm greeting in Roman Urdu (Urdu written in English script) RIGHT NOW. "
-        "Introduce yourself as the BlenSpark Restaurant ordering assistant. "
-        f"Example: 'Assalam-o-alaikum! BlenSpark Restaurant mein khush-amdeed! "
+        "Introduce yourself as the BlenSpark Cafe ordering assistant. "
+        f"Example: 'Assalam-o-alaikum! BlenSpark Cafe mein khush-amdeed! "
         f"Main {name} hoon, aap ka order lene {hoon_suffix}. Aap ki kaise madad kar {sakti}?' "
         "Keep the greeting short and professional. Then wait for the customer to speak."
     )
@@ -143,7 +143,7 @@ def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> 
 
         # Outcome lines
         order_success_delivery = "Aap ka order kamyabi se lag gaya! 30 se 45 minutes mein pohanch jaye ga!"
-        order_success_pickup   = "Aap ka order kamyabi se lag gaya! Aap BlenSpark Restaurant se pick kar sakte hain!"
+        order_success_pickup   = "Aap ka order kamyabi se lag gaya! Aap BlenSpark Cafe se pick kar sakte hain!"
         order_fail        = "Sorry, system mein issue aa gaya hai. Please thori der baad try karein."
         closing_line      = "Humain choose karne ka shukriya! Allah Hafiz!"
         system_error      = "Maafi chahti hoon, system mein abhi masla hai. Thori der baad call karein."
@@ -172,7 +172,7 @@ def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> 
         drink_ask         = "Aap ke saath kaunsa drink lena chahain gay?"
 
         order_success_delivery = "Aap ka order kamyabi se lag gaya! 30 se 45 minutes mein pohanch jaye ga!"
-        order_success_pickup   = "Aap ka order kamyabi se lag gaya! Aap BlenSpark Restaurant se pick kar sakte hain!"
+        order_success_pickup   = "Aap ka order kamyabi se lag gaya! Aap BlenSpark Cafe se pick kar sakte hain!"
         order_fail        = "Sorry, system mein issue aa gaya hai. Please thori der baad try karein."
         closing_line      = "Humain choose karne ka shukriya! Allah Hafiz!"
         system_error      = "Maafi chahta hoon, system mein abhi masla hai. Thori der baad call karein."
@@ -191,7 +191,7 @@ def _build_urdu_prompt(now: str, is_female: bool, has_cached_greeting: bool) -> 
 
     return f"""# Persona
 {greeting_context}
-You are {name}, a friendly, proactive, and professional phone assistant for BlenSpark Restaurant.
+You are {name}, a friendly, proactive, and professional phone assistant for BlenSpark Cafe.
 {gender_desc}
 You speak mainly in Roman Urdu (Urdu written in English script) mixed with English words for better TTS pronunciation.
 English words to use freely: 'menu', 'order', 'deal', 'price', 'total', 'confirmation', 'delivery', 'pickup'.
@@ -276,7 +276,11 @@ When the customer mentions any food item:
   "{system_error}"
   Politely end the call.
 
-## Step 3 — Take the order
+## Step 3 — Category Selection & Take the order
+- If customer asks "menu sunao", "kya kya hai", or asks for the menu: 
+  DO NOT read all items at once. First, look at the menu tool response and list ONLY the available menu CATEGORIES (using the category_name field).
+  Example: "Hamare menu mein Burgers, Drinks, aur Deals hain. Aap kaunsi category sunna chahain gay?"
+- Wait for the customer to pick a category, then read ONLY the items in that category.
 - If item is available: ALWAYS tell the customer the price first, then confirm quantity.
   Example: "Zinger Burger ki price 850 rupees hai. Aap ko kitne chahiye?"
 - If burger is ordered, ask for drink:
@@ -285,7 +289,6 @@ When the customer mentions any food item:
 - ALWAYS state the price of each item from the menu tool response.
   Speak prices in English digits for clear pronunciation.
   Example: "Zinger Burger 850 rupees, Pepsi 150 rupees."
-- If customer asks "menu sunao" or "kya kya hai", read the FULL menu with prices.
 
 ## Step 4 — Calculate and state total
 Calculate total accurately. State in Roman Urdu with digits in English:
@@ -316,7 +319,7 @@ c) "Aap ka complete delivery address aur koi landmark bataein."
 
 ## Step 5-PICKUP — Collect PICKUP details (ONE question at a time)
 (Only if order_type is pickup)
-For pickup orders, you do NOT need a delivery address. The address will be "BlenSpark Restaurant (Pickup)".
+For pickup orders, you do NOT need a delivery address. The address will be "BlenSpark Cafe (Pickup)".
 
 a) "Aap ka poora naam kyaa hai?"
    Repeat back: "Aap ka naam [name] hai — theek hai?"
@@ -326,14 +329,14 @@ b) "Aap ka phone number bataein."
    Repeat back: "Aap ka number [number] hai — theek hai?"
    After YES → IMMEDIATELY go to Step 6 (order confirmation)
 
-(NO address question for pickup. Use "BlenSpark Restaurant (Pickup)" as address automatically.)
+(NO address question for pickup. Use "BlenSpark Cafe (Pickup)" as address automatically.)
 
 ## Step 6 — Full order confirmation
 For DELIVERY:
 "{confirm_opener} — [name] ke liye [items with quantities] ka order, total [X] rupees, delivery address [address]. Kyaa yeh sab theek hai?"
 
 For PICKUP:
-"{confirm_opener} — [name] ke liye [items with quantities] ka pickup order, total [X] rupees, BlenSpark Restaurant se pick up. Kyaa yeh sab theek hai?"
+"{confirm_opener} — [name] ke liye [items with quantities] ka pickup order, total [X] rupees, BlenSpark Cafe se pick up. Kyaa yeh sab theek hai?"
 
 Wait for explicit YES before placing the order.
 
@@ -348,9 +351,9 @@ Only after customer says EXPLICIT YES ("haan", "theek hai", "confirm", "yes", "j
    - customer_name: full name
    - phone_number: phone
    - order_type: "delivery" or "pickup"
-   - address: delivery address (or "BlenSpark Restaurant (Pickup)")
+   - address: delivery address (or "BlenSpark  Cafe (Pickup)")
    - landmark: landmark (or empty string)
-   - items: array of {name, qty, price}
+   - items: array of {{name, qty, price}}
    - total_price: total amount
 3. **WAIT SILENTLY** for the tool result. Do NOT speak anything else.
 4. **AFTER receiving result**:
@@ -437,7 +440,7 @@ Never skip. Never reverse. Never place order without explicit customer confirmat
      "customer_name": "customer full name",
      "phone_number":  "phone number",
      "order_type":    "delivery" or "pickup",
-     "address":       "complete delivery address OR 'BlenSpark Restaurant (Pickup)' for pickup",
+     "address":       "complete delivery address OR 'BlenSpark Cafe (Pickup)' for pickup",
      "landmark":      "nearby landmark (empty string for pickup)",
      "items": [
        {{"name": "Item Name", "qty": 2, "price": 850}},
@@ -461,7 +464,7 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool) 
         drink_ask         = "Which drink would you like with your burger?"
         item_unavailable  = "Sorry, that item isn't on our menu. Is there something else I can help you with?"
         order_success_delivery = "Your order has been placed successfully! It will arrive in 30 to 45 minutes."
-        order_success_pickup   = "Your order has been placed! You can pick it up from BlenSpark Restaurant."
+        order_success_pickup   = "Your order has been placed! You can pick it up from BlenSpark Cafe."
         order_fail        = "Sorry, there was a system issue. Please try again in a few minutes."
         closing_line      = "Thank you for choosing us! Have a great day. Goodbye!"
         system_error      = "I'm sorry, there seems to be a system issue right now. Please call back shortly."
@@ -474,7 +477,7 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool) 
         drink_ask         = "Which drink would you like with your burger?"
         item_unavailable  = "Sorry, that item isn't on our menu. Is there something else I can get for you?"
         order_success_delivery = "Your order has been placed successfully! It will arrive in 30 to 45 minutes."
-        order_success_pickup   = "Your order has been placed! You can pick it up from BlenSpark Restaurant."
+        order_success_pickup   = "Your order has been placed! You can pick it up from BlenSpark Cafe."
         order_fail        = "Sorry, there was a system issue. Please try again in a few minutes."
         closing_line      = "Thank you for choosing us! Have a great day. Goodbye!"
         system_error      = "I'm sorry, there seems to be a system issue right now. Please call back shortly."
@@ -494,7 +497,7 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool) 
     return f"""# Persona
 {greeting_context}
 
-You are {name}, a friendly, proactive, and professional phone assistant for BlenSpark Restaurant.
+You are {name}, a friendly, proactive, and professional phone assistant for BlenSpark Cafe.
 {gender_desc} You are polite, efficient, and helpful.
 You speak primarily in ENGLISH. You understand both English and Urdu from the customer.
 You take both DELIVERY and PICKUP orders.
@@ -555,8 +558,12 @@ When the customer mentions any food item:
 - Verify the item exists in the returned menu.
 - If tool fails: "{system_error}" Then end the call politely.
 
-## Step 3 — Take the order
-- If item is available: state the price, then confirm quantity.
+## Step 3 — Category Selection & Take the order
+- If the customer asks for the menu:
+  DO NOT read all items at once. First, list ONLY the available menu CATEGORIES (using the category_name field).
+  Example: "We have Burgers, Drinks, and Deals. Which category would you like to hear?"
+- Wait for the customer to pick a category, then read ONLY the items in that category.
+- When taking the order for an item: state the price, then confirm quantity.
   "The [item] is [price] rupees. How many would you like?"
 - If burger is ordered: "{drink_ask}"
 - Only add items that exist in the menu — never invent items or prices.
@@ -594,14 +601,14 @@ a) "What is your full name?"
 b) "What is your phone number?"
    Repeat back: "Your number is [number] — is that right?"
 
-(NO address question for pickup. Use "BlenSpark Restaurant (Pickup)" as address automatically.)
+(NO address question for pickup. Use "BlenSpark Cafe (Pickup)" as address automatically.)
 
 ## Step 6 — Full order confirmation
 For DELIVERY:
 "{confirm_opener} — [name], [items with quantities], total [X] rupees, delivered to [address]. Is everything correct?"
 
 For PICKUP:
-"{confirm_opener} — [name], [items with quantities], total [X] rupees, pickup from BlenSpark Restaurant. Is everything correct?"
+"{confirm_opener} — [name], [items with quantities], total [X] rupees, pickup from BlenSpark Cafe. Is everything correct?"
 
 Wait for explicit YES before placing the order.
 
@@ -675,7 +682,7 @@ Never skip. Never reverse. Never place order without explicit customer confirmat
      "customer_name": "customer full name",
      "phone_number":  "phone number",
      "order_type":    "delivery" or "pickup",
-     "address":       "complete delivery address OR 'BlenSpark Restaurant (Pickup)' for pickup",
+     "address":       "complete delivery address OR 'BlenSpark Cafe (Pickup)' for pickup",
      "landmark":      "nearby landmark (empty string for pickup)",
      "items": [
        {{"name": "Item Name", "qty": 2, "price": 850}},
@@ -711,7 +718,7 @@ TOOLS = [
                     "Place a delivery or pickup order after the customer has confirmed all details. "
                     "Never call without explicit confirmation from the customer. "
                     "Send all data in English. For pickup orders, set order_type to 'pickup' "
-                    "and address to 'BlenSpark Restaurant (Pickup)'."
+                    "and address to 'BlenSpark Cafe (Pickup)'."
                 ),
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
@@ -730,7 +737,7 @@ TOOLS = [
                         ),
                         "address": types.Schema(
                             type=types.Type.STRING,
-                            description="Complete delivery address, or 'BlenSpark Restaurant (Pickup)' for pickup orders.",
+                            description="Complete delivery address, or 'BlenSpark Cafe (Pickup)' for pickup orders.",
                         ),
                         "landmark": types.Schema(
                             type=types.Type.STRING,

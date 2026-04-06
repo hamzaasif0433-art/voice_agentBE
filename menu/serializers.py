@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Order, Call, Menu
+from .models import Order, Call, Menu, Category
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -26,7 +26,15 @@ class ChatTokenSerializer(serializers.Serializer):
     """Serializer for generating browser chat tokens"""
     user_context = serializers.JSONField(required=False, help_text="User context data for the session")
 
+class CategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Category
+        fields = "__all__"
+
+
 class MenuSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    
     class Meta:
         model = Menu
         fields = "__all__"

@@ -2,8 +2,8 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.views.decorators.csrf import csrf_exempt
-from .serializers import OrderSerializer, InitiateCallSerializer, ChatTokenSerializer, CallSerializer,MenuSerializer
-from .models import Order, Call, Menu
+from .serializers import OrderSerializer, InitiateCallSerializer, ChatTokenSerializer, CallSerializer, MenuSerializer, CategorySerializer
+from .models import Order, Call, Menu, Category
 from .services import ElevenLabsService
 import uuid
 
@@ -62,6 +62,44 @@ def menu(request):
         return Response({
             "success": True,
             "menu": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['GET', 'POST', 'DELETE'])
+def categories(request):
+    """Manage Menu Categories"""
+    if request.method == "POST":
+        serializer = CategorySerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "success": True,
+                "message": "Category created successfully",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response({
+            "success": False,
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == "DELETE":
+        cat_id = request.query_params.get('id')
+        if not cat_id:
+            return Response({"success": False, "message": "ID required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            category = Category.objects.get(id=int(cat_id))
+            category.delete()
+            return Response({"success": True, "message": "Category deleted"}, status=status.HTTP_200_OK)
+        except (ValueError, Category.DoesNotExist):
+            return Response({"success": False, "message": "Invalid ID or not found"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == "GET":
+        data = Category.objects.all()
+        serializer = CategorySerializer(data, many=True)
+        return Response({
+            "success": True,
+            "categories": serializer.data
         }, status=status.HTTP_200_OK)
 
 

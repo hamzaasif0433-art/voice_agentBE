@@ -32,15 +32,22 @@ def menu() -> str:
             data = data["menu"]
             
         if isinstance(data, list):
-            # Flat list of items
-            lines = ["=== BlenSpark Restaurant Menu ==="]
+            # Group items by category_name for the LLM
+            from collections import defaultdict
+            grouped = defaultdict(list)
             for item in data:
-                name = item.get("name", item.get("item_name", "Unknown"))
-                # Backend uses 'cost'
-                price = item.get("cost", item.get("price", "?"))
-                category = item.get("category", "")
-                cat_str = f" [{category}]" if category else ""
-                lines.append(f"  • {name} — Rs. {price}{cat_str}")
+                cat = item.get("category_name")
+                if not cat:
+                    cat = "General"
+                grouped[cat].append(item)
+
+            lines = ["=== BlenSpark Restaurant Menu ==="]
+            for cat, items in grouped.items():
+                lines.append(f"\n[ {cat} ]")
+                for item in items:
+                    name = item.get("name", item.get("item_name", "Unknown"))
+                    price = item.get("cost", item.get("price", "?"))
+                    lines.append(f"  • {name} — Rs. {price}")
             lines.append("\n=================================")
             return "\n".join(lines)
 
