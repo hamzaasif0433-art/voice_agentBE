@@ -969,23 +969,34 @@ async def execute_tool(tool_name: str, tool_args: dict) -> dict:
             def _background_tasks(appt_id):
                 try:
                     from appointment.models import Appointment as Appt
-                    from appointment.services.google_calender import create_meeting
-                    from appointment.services.email_service import send_appointment_email
+                    import requests
+                    import os
+                    from appointment.serializers import AppointmentSerializer
+                    
                     appt = Appt.objects.get(id=appt_id)
+                    
+                    # Google Calendar (currently disabled / not requested to fix, matching views.py structure)
+                    # try:
+                    #     from appointment.services.google_calender import create_meeting
+                    #     cal = create_meeting(appt)
+                    #     appt.google_event_id = cal["event_id"]
+                    #     appt.meet_link = cal["meet_link"]
+                    #     appt.calendar_link = cal["calendar_link"]
+                    #     appt.save()
+                    # except Exception as ce:
+                    #     logger.error(f"Background Calendar error: {ce}")
+                    
+                    # 2. Send Confirmation Email via Next.js API
                     try:
-                        cal = create_meeting(appt)
-                        appt.google_event_id = cal["event_id"]
-                        appt.meet_link = cal["meet_link"]
-                        appt.calendar_link = cal["calendar_link"]
-                        appt.save()
-                    except Exception as ce:
-                        logger.error(f"Background Calendar error: {ce}")
-                    try:
-                        send_appointment_email(appt)
+                        url = os.environ.get("NEXT_PUBLIC_APP_URL", "http://localhost:3000") + "/api/email"
+                        data = AppointmentSerializer(appt).data
+                        requests.post(url, json=data, timeout=10)
+                        logger.info(f"Triggered Next.js email API for appointment {appt_id}")
                     except Exception as ee:
                         logger.error(f"Background Email error: {ee}")
+                        
                 except Exception as e:
-                    logger.error(f"Background task error: {e}")
+                    logger.error(f"Background Task Management error: {e}")
 
             threading.Thread(target=_background_tasks, args=(appointment.id,), daemon=True).start()
             return AppointmentSerializer(appointment).data
