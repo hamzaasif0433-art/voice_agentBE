@@ -174,3 +174,4 @@ zope.traversing==6.0
 zope.viewlet==6.0
 gunicorn==23.0.0
 pydub==0.25.1
+psycopg2-binary
