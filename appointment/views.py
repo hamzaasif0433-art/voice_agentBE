@@ -152,15 +152,15 @@ class AppointmentCreateView(APIView):
                     # Re-fetch instance to ensure thread-safety
                     appt = Appointment.objects.get(id=appt_id)
                     
-                    # 1. Create Google Calendar Meeting
-                    try:
-                        calendar_data = create_meeting(appt)
-                        appt.google_event_id = calendar_data['event_id']
-                        appt.meet_link        = calendar_data['meet_link']
-                        appt.calendar_link    = calendar_data['calendar_link']
-                        appt.save()
-                    except Exception as ce:
-                        print(f"Background Calendar error: {ce}")
+                    # 1. Google Calendar creation is disabled for now.
+                    # try:
+                    #     calendar_data = create_meeting(appt)
+                    #     appt.google_event_id = calendar_data['event_id']
+                    #     appt.meet_link        = calendar_data['meet_link']
+                    #     appt.calendar_link    = calendar_data['calendar_link']
+                    #     appt.save()
+                    # except Exception as ce:
+                    #     print(f"Background Calendar error: {ce}")
 
                     # 2. Send Confirmation Email
                     try:
