@@ -1,5 +1,6 @@
 # voice_agent/consumers.py
 import asyncio
+import base64
 import audioop
 import json
 import logging
@@ -16,9 +17,11 @@ import vertexai
 import truststore
 import uuid
 import time
+import urllib.parse
 truststore.inject_into_ssl()
 from asgiref.sync import sync_to_async
 from Analytics.models import GeminiSessionCost, CallHistory
+from .audio import twilio_payload_to_pcm16k
 
 # ---------------------------------------------------------------------------
 # Load service account credentials from environment variable
@@ -368,6 +371,14 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._last_session_handle = None
         self._booking_state = ""  # Tracks appointment/order booking status (e.g., "booked", "confirmed")
         self._pending_tool_calls = 0  # Track pending tool call count
+        self._transport = "browser"
+        self._twilio_stream_sid = None
+        self._twilio_call_sid = None
+        self._twilio_ready = asyncio.Event()
+
+    def _parse_query_params(self) -> dict:
+        qs = self.scope.get("query_string", b"").decode("utf-8")
+        return dict(urllib.parse.parse_qsl(qs))
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle
@@ -376,6 +387,9 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self._start_time = time.time()
         await self.accept()
+
+        params = self._parse_query_params()
+        self._transport = params.get("transport", "browser").lower()
 
         print(
             f"[WS Connect] SA email='{_sa_info.get('client_email')}', "
@@ -394,7 +408,67 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._tasks.append(task)
 
     async def receive(self, bytes_data=None, text_data=None):
-        if self._disconnecting or not bytes_data:
+        if self._disconnecting:
+            return
+
+        if self._transport == "twilio" and text_data:
+            try:
+                msg = json.loads(text_data)
+            except json.JSONDecodeError:
+                logger.warning("[TwilioWS] Non-JSON message received")
+                return
+
+            event = msg.get("event")
+            if event == "connected":
+                print(f"[TwilioWS] Twilio connected: protocol={msg.get('protocol')}", flush=True)
+                return
+            if event == "start":
+                start_data = msg.get("start", {})
+                self._twilio_stream_sid = start_data.get("streamSid", msg.get("streamSid"))
+                self._twilio_call_sid = start_data.get("callSid", "")
+                self._twilio_ready.set()
+                print(
+                    f"[TwilioWS] Stream started: CallSid={self._twilio_call_sid} StreamSid={self._twilio_stream_sid}",
+                    flush=True,
+                )
+                return
+            if event == "media":
+                media = msg.get("media", {})
+                payload = media.get("payload", "")
+                if not payload:
+                    return
+                pcm_16k, self._upsample_state = twilio_payload_to_pcm16k(
+                    payload, self._upsample_state
+                )
+                if not self._session_ready.is_set():
+                    return
+                session = self.gemini_session
+                if session is None:
+                    self._clear_session_state()
+                    return
+                try:
+                    await session.send_realtime_input(
+                        audio=types.Blob(
+                            data=pcm_16k,
+                            mime_type=f"audio/pcm;rate={MIC_RATE}",
+                        )
+                    )
+                except Exception as exc:
+                    logger.error("Gemini session error while forwarding Twilio audio: %s", exc, exc_info=True)
+                    self._clear_session_state()
+                    # await self.disconnect(1011) # Just clear state, no need to disconnect ws implicitly here
+                return
+            if event == "stop":
+                print("[TwilioWS] Stream stopped by Twilio", flush=True)
+                await self.disconnect(1000)
+                return
+            if event == "mark":
+                logger.debug("[TwilioWS] Mark event: %s", msg.get("mark", {}).get("name"))
+                return
+            logger.debug("[TwilioWS] Unknown event: %s", event)
+            return
+
+        if not bytes_data:
             return
         if not self._session_ready.is_set():
             return
@@ -421,9 +495,10 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             self._clear_session_state()
 
     async def disconnect(self, close_code):
-        print(f"[WS] Browser connection closed (code {close_code}), cancelling {len(self._tasks)} tasks...", flush=True)
+        print(f"[WS] Connection closed (code {close_code}), cancelling {len(self._tasks)} tasks...", flush=True)
         self._disconnecting = True
         self._clear_session_state()
+        self._twilio_ready.set() # Unblock any pending tasks waiting on this Event
         for task in self._tasks:
             if not task.done():
                 task.cancel()
@@ -462,16 +537,16 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         return "ur-PK"
 
     def _get_greeting_path(self):
-        from .agents.healthcare import GREETING_PATH
-        return GREETING_PATH
+        from .agents.healthcare import get_greeting_path
+        return get_greeting_path(self._get_language_code(), self._get_voice_name())
 
     def _get_greeting_prompt(self) -> str:
-        from .agents.healthcare import GREETING_PROMPT
-        return GREETING_PROMPT
+        from .agents.healthcare import get_greeting_prompt
+        return get_greeting_prompt(self._get_language_code())
 
     def _get_generate_greeting_prompt(self) -> str:
-        from .agents.healthcare import GENERATE_GREETING_PROMPT
-        return GENERATE_GREETING_PROMPT
+        from .agents.healthcare import get_generate_greeting_prompt
+        return get_generate_greeting_prompt(self._get_language_code(), self._get_voice_name())
 
     async def _execute_tool(self, tool_name: str, tool_args: dict) -> dict:
         from .agents.healthcare import execute_tool
@@ -482,15 +557,26 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     # ------------------------------------------------------------------
 
     async def _run_gemini_session(self):
+        t_start = time.time()
         voice_name    = self._get_voice_name()
         language_code = self._get_language_code()
         
         greeting_path = self._get_greeting_path()
         has_cached_greeting = greeting_path.exists()
         
+        print(f"[WS DEBUG] Building config: voice={voice_name}, lang={language_code}, greeting_cached={has_cached_greeting}", flush=True)
+        
+        t1 = time.time()
         schedule_data = await self._fetch_schedule_data()
+        print(f"[WS DEBUG] _fetch_schedule_data took {time.time()-t1:.2f}s", flush=True)
+        
+        t2 = time.time()
         system_prompt = self._get_system_prompt(has_cached_greeting=has_cached_greeting, schedule_data=schedule_data)
+        print(f"[WS DEBUG] _get_system_prompt took {time.time()-t2:.2f}s", flush=True)
+        
+        t3 = time.time()
         tools         = self._get_tools()
+        print(f"[WS DEBUG] _get_tools took {time.time()-t3:.2f}s", flush=True)
 
         live_config = types.LiveConnectConfig(
             system_instruction=types.Content(
@@ -523,26 +609,36 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             ),
         )
 
+        print(f"[WS DEBUG] Config built. Model={LIVE_MODEL}. Connecting to Gemini Live...", flush=True)
+        t0 = time.time()
+
         try:
             async with self.client.aio.live.connect(
                 model=LIVE_MODEL, config=live_config
             ) as session:
+                elapsed = time.time() - t0
+                print(f"[WS] ✅ Gemini Live session OPEN in {elapsed:.2f}s", flush=True)
                 self.gemini_session = session
                 self._session_ready.set()
-                # print("[WS] Gemini Live session open successfully!", flush=True)
 
                 await self._on_gemini_ready()
+                print(f"[WS DEBUG] _on_gemini_ready done, starting greeting...", flush=True)
                 await self._handle_greeting(session)
+                print(f"[WS DEBUG] Greeting done, entering receive loop...", flush=True)
                 await self._receive_loop(session)
 
                 if not self._disconnecting:
-                    # print("[WS INFO] Gemini Live session receive loop ended cleanly — closing WebSocket", flush=True)
+                    print("[WS INFO] Gemini Live receive loop ended cleanly — closing WebSocket", flush=True)
                     await self.close()
 
         except asyncio.CancelledError:
-            logger.info("Gemini session task cancelled (call ended)")
+            elapsed = time.time() - t0
+            print(f"[WS] Gemini session task CANCELLED after {elapsed:.2f}s (call ended / Twilio disconnected)", flush=True)
         except Exception as e:
-            print(f">>> [WS ERROR] Failed to connect to Gemini Live: {type(e).__name__}: {str(e)}", flush=True)
+            elapsed = time.time() - t0
+            print(f">>> [WS ERROR] Gemini Live FAILED after {elapsed:.2f}s: {type(e).__name__}: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
             self._clear_session_state()
             await self.close()
         finally:
@@ -576,7 +672,28 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
     async def _stream_pcm_to_sip(self, pcm_24k: bytes):
         sip_audio = _pcm_to_mulaw(pcm_24k)
+        await self._send_audio_chunk(sip_audio)
+
+    async def _send_audio_chunk(self, sip_audio: bytes):
         chunk_size = 160
+        if self._transport == "twilio":
+            if not self._twilio_ready.is_set():
+                await self._twilio_ready.wait()
+            if not self._twilio_stream_sid:
+                return
+
+            for i in range(0, len(sip_audio), chunk_size):
+                chunk = sip_audio[i : i + chunk_size]
+                payload = base64.b64encode(chunk).decode("ascii")
+                await self.send(text_data=json.dumps({
+                    "event": "media",
+                    "streamSid": self._twilio_stream_sid,
+                    "media": {"payload": payload},
+                }))
+                # Twilio needs slightly less sleep or no sleep to avoid lag
+                await asyncio.sleep(0.01)
+            return
+
         for i in range(0, len(sip_audio), chunk_size):
             await self.send(bytes_data=sip_audio[i : i + chunk_size])
             await asyncio.sleep(0.02)
@@ -725,7 +842,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                                 if self._save_as_greeting:
                                     greeting_buffer.extend(inline.data)
                                 sip_audio = _pcm_to_mulaw(inline.data)
-                                await self.send(bytes_data=sip_audio)
+                                await self._send_audio_chunk(sip_audio)
 
                     if getattr(sc, "turn_complete", False) or getattr(sc, "interrupted", False):
                         if self._save_as_greeting and greeting_buffer:

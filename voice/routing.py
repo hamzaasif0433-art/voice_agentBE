@@ -1,13 +1,11 @@
 """WebSocket URL patterns for voice agents."""
 from django.urls import re_path
 
-from . import consumers
 from . import consumers1
 from voice.consumers_browser import BrowserVoiceConsumer  # Browser FE (PCM16)
 
 websocket_urlpatterns = [
-    # Legacy Twilio / SIP routes
-    re_path(r"^ws/voice/stream/$",          consumers.TwilioMediaConsumer.as_asgi()),
+    # Inbound Twilio now uses the Gemini Live consumer route.
     re_path(r"^ws/voice/voice-agent/$",     consumers1.VoiceAgentConsumer.as_asgi()),
 
     # Dynamic browser route — agent_id resolved per-connection
