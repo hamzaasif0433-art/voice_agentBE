@@ -375,6 +375,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         self._twilio_stream_sid = None
         self._twilio_call_sid = None
         self._twilio_ready = asyncio.Event()
+        self._twilio_media_count = 0
 
     def _parse_query_params(self) -> dict:
         qs = self.scope.get("query_string", b"").decode("utf-8")
@@ -390,6 +391,10 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
         params = self._parse_query_params()
         self._transport = params.get("transport", "browser").lower()
+        
+        # Log transport detection for debugging
+        qs = self.scope.get("query_string", b"").decode("utf-8")
+        print(f"[WS Connect] transport={self._transport}, query_string='{qs}'", flush=True)
 
         print(
             f"[WS Connect] SA email='{_sa_info.get('client_email')}', "
@@ -398,7 +403,6 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         )
 
         # Use Direct Google AI Studio API for Gemini 3.1 Flash Live Preview
-        # This resolves the 1008 (Vertex AI) Policy Violation error encountered in us-central1
         self.client = genai.Client(
             api_key=os.environ.get("GEMINI_API_KEY"),
         )
@@ -411,14 +415,30 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         if self._disconnecting:
             return
 
+        # ── Auto-detect Twilio transport from JSON text messages ──
+        # Dev tunnels often strip query params, so ?transport=twilio may be lost.
+        # Detect Twilio by checking for its event-based JSON protocol.
+        if text_data and self._transport != "twilio":
+            try:
+                probe = json.loads(text_data)
+                if probe.get("event") in ("connected", "start", "media", "stop"):
+                    print(f"[WS] ⚡ Auto-detected Twilio transport from '{probe.get('event')}' event", flush=True)
+                    self._transport = "twilio"
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
         if self._transport == "twilio" and text_data:
             try:
                 msg = json.loads(text_data)
             except json.JSONDecodeError:
-                logger.warning("[TwilioWS] Non-JSON message received")
+                print("[TwilioWS] Non-JSON message received", flush=True)
                 return
 
             event = msg.get("event")
+            # Log first few events + every 100th media event
+            if event != "media" or self._twilio_media_count < 3 or self._twilio_media_count % 100 == 0:
+                print(f"[TwilioWS] Event received: {event} (media_count={self._twilio_media_count})", flush=True)
+
             if event == "connected":
                 print(f"[TwilioWS] Twilio connected: protocol={msg.get('protocol')}", flush=True)
                 return
@@ -433,6 +453,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 )
                 return
             if event == "media":
+                self._twilio_media_count += 1
                 media = msg.get("media", {})
                 payload = media.get("payload", "")
                 if not payload:
@@ -522,19 +543,25 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         schedules = await sync_to_async(lambda: list(Schedule.objects.all()))()
         return ScheduleSerializer(schedules, many=True).data
 
+
     def _get_system_prompt(self, has_cached_greeting: bool = False, schedule_data: list = None) -> str:
         from .agents.healthcare import build_system_prompt
-        return build_system_prompt(has_cached_greeting=has_cached_greeting, schedule_data=schedule_data)
+        return build_system_prompt(
+            language=self._get_language_code(),
+            voice=self._get_voice_name(),
+            has_cached_greeting=has_cached_greeting,
+            schedule_data=schedule_data
+        )
 
     def _get_tools(self):
         from .agents.healthcare import TOOLS
         return TOOLS
 
     def _get_voice_name(self) -> str:
-        return "Aoede"
+        return "Puck"
 
     def _get_language_code(self) -> str:
-        return "ur-PK"
+        return "en-US"
 
     def _get_greeting_path(self):
         from .agents.healthcare import get_greeting_path
@@ -671,27 +698,41 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         print("[WS] _handle_greeting completed", flush=True)
 
     async def _stream_pcm_to_sip(self, pcm_24k: bytes):
-        sip_audio = _pcm_to_mulaw(pcm_24k)
+        pcm_8k, self._downsample_state = audioop.ratecv(
+            pcm_24k, 2, 1, OUT_RATE, SIP_RATE, self._downsample_state
+        )
+        sip_audio = audioop.lin2ulaw(pcm_8k, 2)
         await self._send_audio_chunk(sip_audio)
 
     async def _send_audio_chunk(self, sip_audio: bytes):
         chunk_size = 160
         if self._transport == "twilio":
             if not self._twilio_ready.is_set():
+                print("[TwilioWS] Waiting for _twilio_ready...", flush=True)
                 await self._twilio_ready.wait()
+                print(f"[TwilioWS] _twilio_ready SET. StreamSid={self._twilio_stream_sid}", flush=True)
             if not self._twilio_stream_sid:
+                print("[TwilioWS] ⚠️ No streamSid — cannot send audio!", flush=True)
                 return
 
+            total_chunks = (len(sip_audio) + chunk_size - 1) // chunk_size
+            print(f"[TwilioWS] Sending {total_chunks} audio chunks ({len(sip_audio)} bytes) to StreamSid={self._twilio_stream_sid}", flush=True)
+            sent = 0
             for i in range(0, len(sip_audio), chunk_size):
                 chunk = sip_audio[i : i + chunk_size]
                 payload = base64.b64encode(chunk).decode("ascii")
-                await self.send(text_data=json.dumps({
-                    "event": "media",
-                    "streamSid": self._twilio_stream_sid,
-                    "media": {"payload": payload},
-                }))
-                # Twilio needs slightly less sleep or no sleep to avoid lag
+                try:
+                    await self.send(text_data=json.dumps({
+                        "event": "media",
+                        "streamSid": self._twilio_stream_sid,
+                        "media": {"payload": payload},
+                    }))
+                    sent += 1
+                except Exception as e:
+                    print(f"[TwilioWS] ❌ Send failed at chunk {sent}/{total_chunks}: {e}", flush=True)
+                    break
                 await asyncio.sleep(0.01)
+            print(f"[TwilioWS] ✅ Sent {sent}/{total_chunks} chunks", flush=True)
             return
 
         for i in range(0, len(sip_audio), chunk_size):
@@ -841,8 +882,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                             if inline and inline.data:
                                 if self._save_as_greeting:
                                     greeting_buffer.extend(inline.data)
-                                sip_audio = _pcm_to_mulaw(inline.data)
-                                await self._send_audio_chunk(sip_audio)
+                                await self._stream_pcm_to_sip(inline.data)
 
                     if getattr(sc, "turn_complete", False) or getattr(sc, "interrupted", False):
                         if self._save_as_greeting and greeting_buffer:

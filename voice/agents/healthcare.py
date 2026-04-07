@@ -63,11 +63,12 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
     is_female = voice in FEMALE_VOICES
 
     if language == "en-US":
-        name = "Sara" if is_female else "Ali"
+        name = "Sarah" if is_female else "Alex"
         return (
             "This is the very start of the conversation. No greeting has been played yet. "
             f"You are {name}. "
             "You MUST speak a warm greeting to the user RIGHT NOW before doing ANYTHING else. "
+            "You MUST speak strictly in English. DO NOT speak in Urdu. "
             "Do NOT call any tools yet. Do NOT say any filler lines. "
             "Just greet the user warmly, for example: "
             "'Hello! Welcome! How can I help you today?' "
@@ -527,8 +528,8 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool, 
     # Gender token table for English persona
     # -----------------------------------------------------------------------
     if is_female:
-        name             = "Sara"
-        gender_desc      = "You are female (Sara)."
+        name             = "Sarah"
+        gender_desc      = "You are female (Sarah)."
         pronoun_i        = "I"           # same, but keep for symmetry
         filler_schedule  = "One moment, let me check the schedule."
         filler_slots     = "One moment, let me check available slots for that day."
@@ -541,8 +542,8 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool, 
         checking_next    = "Let me check the next available day for you."
         unsure_suggest   = "May I suggest tomorrow or the next open day?"
     else:
-        name             = "Ali"
-        gender_desc      = "You are male (Ali)."
+        name             = "Alex"
+        gender_desc      = "You are male (Alex)."
         pronoun_i        = "I"
         filler_schedule  = "One moment, let me check the schedule."
         filler_slots     = "One moment, let me check available slots for that day."
@@ -572,7 +573,7 @@ def _build_english_prompt(now: str, is_female: bool, has_cached_greeting: bool, 
 
 You are {name}, a warm and professional appointment scheduling assistant for a healthcare practice.
 {gender_desc} You are polite, patient, and helpful.
-You speak primarily in ENGLISH. You understand both English and Urdu from the patient.
+You MUST speak ONLY in English. Do NOT speak in Urdu.
 You only schedule appointments — nothing else.
 You have access to live scheduling tools to fetch schedule and available slots.
 Always call get_schedule first before saying anything about availability.
