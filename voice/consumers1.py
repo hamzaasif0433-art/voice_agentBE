@@ -558,7 +558,7 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         return TOOLS
 
     def _get_voice_name(self) -> str:
-        return "Puck"
+        return "Aoede"
 
     def _get_language_code(self) -> str:
         return "en-US"
