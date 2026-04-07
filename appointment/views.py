@@ -10,7 +10,9 @@ from .services.google_calender import create_meeting, cancel_meeting
 from .services.email_service import send_appointment_email
 from rest_framework.views import APIView
 from datetime import datetime, timedelta, date as today_date
-
+from kfc_api.pagination import paginate_queryset
+import requests
+import os
 @csrf_exempt
 @api_view(['GET', 'POST', 'PATCH'])
 def schedule(request):
@@ -162,7 +164,9 @@ class AppointmentCreateView(APIView):
 
                     # 2. Send Confirmation Email
                     try:
-                        send_appointment_email(appt)
+                        url = os.environ.get("NEXT_PUBLIC_APP_URL", "http://localhost:3000") + "/api/email"
+                        data = AppointmentSerializer(appt).data
+                        requests.post(url, json=data, timeout=10)
                     except Exception as ee:
                         print(f"Background Email error: {ee}")
                 except Exception as e:
@@ -193,7 +197,7 @@ class AppointmentCancelView(APIView):
 class AppointmentListView(APIView):
 
     def get(self, request):
-        appointments = Appointment.objects.all().order_by('date', 'start_time')
+        appointments = Appointment.objects.all().order_by('-created_at')
 
         # Optional filters
         status_filter = request.query_params.get('status')
@@ -212,12 +216,7 @@ class AppointmentListView(APIView):
                 )
             appointments = appointments.filter(date=date)
 
-        serializer = AppointmentSerializer(appointments, many=True)
-        return Response({
-            'success': True,
-            'count': appointments.count(),
-            'data': serializer.data
-        }, status=status.HTTP_200_OK)
+        return paginate_queryset(request, appointments, AppointmentSerializer, data_key="data")
 
 
 class AvailableSlotsView(APIView):

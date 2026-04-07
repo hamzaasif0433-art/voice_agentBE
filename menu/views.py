@@ -5,6 +5,7 @@ from django.views.decorators.csrf import csrf_exempt
 from .serializers import OrderSerializer, InitiateCallSerializer, ChatTokenSerializer, CallSerializer, MenuSerializer, CategorySerializer
 from .models import Order, Call, Menu, Category
 from .services import ElevenLabsService
+from kfc_api.pagination import paginate_queryset
 import uuid
 
 
@@ -56,13 +57,13 @@ def menu(request):
             }, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "GET":
-        data = Menu.objects.all()
-        serializer = MenuSerializer(data, many=True)
-
-        return Response({
-            "success": True,
-            "menu": serializer.data
-        }, status=status.HTTP_200_OK)
+        data = Menu.objects.all().order_by('-id')
+        
+        category_filter = request.query_params.get('category')
+        if category_filter:
+            data = data.filter(category_id=category_filter)
+            
+        return paginate_queryset(request, data, MenuSerializer, data_key="menu")
 
 
 @csrf_exempt
@@ -95,7 +96,7 @@ def categories(request):
             return Response({"success": False, "message": "Invalid ID or not found"}, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == "GET":
-        data = Category.objects.all()
+        data = Category.objects.all().order_by('-id')
         serializer = CategorySerializer(data, many=True)
         return Response({
             "success": True,
@@ -123,13 +124,8 @@ def orders(request):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
     if request.method == "GET":
-        orders = Order.objects.all()
-        serializer = OrderSerializer(orders, many=True)
-
-        return Response({
-            "success": True,
-            "orders": serializer.data
-        }, status=status.HTTP_200_OK)
+        orders = Order.objects.all().order_by('-id')
+        return paginate_queryset(request, orders, OrderSerializer, data_key="orders")
 
 
 @csrf_exempt
@@ -143,23 +139,19 @@ def call_list(request):
       ?status=completed|initiated|ongoing|failed
       ?call_type=browser|outbound|inbound
     """
-    calls = Call.objects.all()
+    if request.method == "GET":
+        calls = Call.objects.all().order_by('-id')
 
-    status_filter    = request.query_params.get('status')
-    call_type_filter = request.query_params.get('call_type')
+        status_filter    = request.query_params.get('status')
+        call_type_filter = request.query_params.get('call_type')
 
-    if status_filter:
-        calls = calls.filter(status=status_filter)
+        if status_filter:
+            calls = calls.filter(status=status_filter)
 
-    if call_type_filter:
-        calls = calls.filter(call_type=call_type_filter)
+        if call_type_filter:
+            calls = calls.filter(call_type=call_type_filter)
 
-    serializer = CallSerializer(calls, many=True)
-    return Response({
-        "success": True,
-        "count": calls.count(),
-        "data": serializer.data
-    }, status=status.HTTP_200_OK)
+        return paginate_queryset(request, calls, CallSerializer, data_key="data")
 
 
 @csrf_exempt
