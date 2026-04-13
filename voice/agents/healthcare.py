@@ -63,17 +63,15 @@ def get_generate_greeting_prompt(language: str = "ur-PK", voice: str = "Puck") -
     is_female = voice in FEMALE_VOICES
 
     if language == "en-US":
-        name = "Sarah" if is_female else "Alex"
+        name = "Sara" if is_female else "Alex"
         return (
             "This is the very start of the conversation. No greeting has been played yet. "
             f"You are {name}. "
-            "You MUST speak a warm greeting to the user RIGHT NOW before doing ANYTHING else. "
+            "You MUST speak exactly this greeting RIGHT NOW before doing ANYTHING else: "
+            f"'Hello! Thank you for calling BlenSpark Clinic. My name is {name}, your virtual health assistant. I'm here to help you book an appointment today. May I please have your full name to get started?' "
             "You MUST speak strictly in English. DO NOT speak in Urdu. "
             "Do NOT call any tools yet. Do NOT say any filler lines. "
-            "Just greet the user warmly, for example: "
-            "'Hello! Welcome! How can I help you today?' "
-            "Keep the greeting short and warm. After you finish greeting, "
-            "the user will respond and then you can proceed normally."
+            "Just speak this greeting exactly as written and wait for the user to respond."
         )
 
     # Roman Urdu — gender-aware
