@@ -138,10 +138,13 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         return await self._agent_cfg["execute_tool"](tool_name, tool_args)
 
     # ------------------------------------------------------------------
-    # Override: receive raw PCM16 from browser, no mulaw decode
+    # Override: receive raw PCM16 from browser, or use parent for Twilio
     # ------------------------------------------------------------------
 
     async def receive(self, bytes_data=None, text_data=None):
+        if self._transport == "twilio":
+            return await super().receive(bytes_data=bytes_data, text_data=text_data)
+
         if self._disconnecting or not bytes_data:
             return
         if len(bytes_data) % 2 != 0:
@@ -186,11 +189,14 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         await super().disconnect(close_code)
 
     # ------------------------------------------------------------------
-    # Override: stream raw PCM16 to browser (no mulaw)
+    # Override: stream raw PCM16 to browser or defer to parent for Twilio
     # ------------------------------------------------------------------
 
     async def _stream_pcm_to_sip(self, pcm_24k: bytes):
-        """Stream cached greeting PCM directly to browser in chunks."""
+        """Stream cached greeting PCM directly to browser in chunks, or via SIP."""
+        if self._transport == "twilio":
+            return await super()._stream_pcm_to_sip(pcm_24k)
+
         print(f"[BrowserWS] Streaming cached greeting ({len(pcm_24k)} bytes)", flush=True)
         try:
             for i in range(0, len(pcm_24k), BROWSER_PCM_CHUNK):
@@ -328,7 +334,10 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                             if inline and inline.data:
                                 if self._save_as_greeting:
                                     greeting_buffer.extend(inline.data)
-                                await self.send(bytes_data=inline.data)
+                                if self._transport == "twilio":
+                                    await self._stream_pcm_to_sip(inline.data)
+                                else:
+                                    await self.send(bytes_data=inline.data)
 
                     # Manage Greeting Saving
                     if (getattr(sc, "turn_complete", False) or getattr(sc, "interrupted", False)) and self._save_as_greeting and greeting_buffer:

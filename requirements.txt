@@ -107,6 +107,7 @@ ujson==5.11.0
 uritemplate==4.2.0
 urllib3==2.6.3
 websockets==16.0
+pyVoIP==1.6.8
 yarl==1.23.0
 truststore==0.10.0
 z3c.flashmessage==4.0

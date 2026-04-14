@@ -131,11 +131,13 @@ class TwilioMediaConsumer(AsyncWebsocketConsumer):
 
             # Start Deepgram in a thread (synchronous SDK)
             await asyncio.to_thread(self._session.start_deepgram)
+            logger.info("[TwilioWS] Deepgram started successfully")
 
             # Notify frontend that session is ready
             await self._send_json({"event": "session_ready"})
 
             # Trigger greeting immediately after connection
+            logger.info("[TwilioWS] Triggering audio greeting")
             self._session.trigger_greeting()
         except Exception as exc:
             logger.exception("[TwilioWS] Failed to start call session: %s", exc)

@@ -396,16 +396,16 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         qs = self.scope.get("query_string", b"").decode("utf-8")
         print(f"[WS Connect] transport={self._transport}, query_string='{qs}'", flush=True)
 
-        print(
-            f"[WS Connect] SA email='{_sa_info.get('client_email')}', "
-            f"project='{_PROJECT}', location='{_LOCATION}'",
-            flush=True,
-        )
+        # print(
+        #     f"[WS Connect] SA email='{_sa_info.get('client_email')}', "
+        #     f"project='{_PROJECT}', location='{_LOCATION}'",
+        #     flush=True,
+        # )
 
         # Use Direct Google AI Studio API for Gemini 3.1 Flash Live Preview
-        self.client = genai.Client(
-            api_key=os.environ.get("GEMINI_API_KEY"),
-        )
+        self.client = await sync_to_async(
+            lambda: genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        )()
         print(f"[WS Connect] Gemini client created (Direct API)", flush=True)
 
         task = asyncio.create_task(self._run_gemini_session())
