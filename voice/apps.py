@@ -7,7 +7,7 @@ class VoiceConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "voice"
     verbose_name = "Twilio Voice"
-
+    
     def ready(self):
         # Get MEDIA_ROOT with fallback, ensuring it's not empty
         media_root = getattr(settings, "MEDIA_ROOT", None)

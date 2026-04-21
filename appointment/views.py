@@ -164,7 +164,7 @@ class AppointmentCreateView(APIView):
 
                     # 2. Send Confirmation Email
                     try:
-                        url = os.environ.get("NEXT_PUBLIC_APP_URL", "http://localhost:3000") + "/api/email"
+                        url = os.environ.get("NEXT_PUBLIC_APP_URL") + "/api/email"
                         print(url)
                         data = AppointmentSerializer(appt).data
                         requests.post(url, json=data, timeout=10)

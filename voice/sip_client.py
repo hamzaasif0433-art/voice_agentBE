@@ -27,7 +27,7 @@ from pyVoIP.VoIP import VoIPPhone, InvalidStateError, CallState
 
 logger = logging.getLogger(__name__)
 
-# ── Audio format constants (same as consumers1.py) ───────────────────
+# ── Audio format constants (same as consumers.py) ───────────────────
 SIP_RATE = 8000      # G.711 µ-law from SIP
 MIC_RATE = 16000     # What Gemini expects for input
 OUT_RATE = 24000     # What Gemini produces for output
@@ -480,12 +480,18 @@ class SIPCallBridge:
                                 "role": "agent",
                                 "text": self._current_agent_turn.strip(),
                             })
-                            # Check for goodbye
+                            # Check for end condition
                             idx = self._current_agent_turn.lower()
-                            if "allah hafiz" in idx or "اللہ حافظ" in idx or "goodbye" in idx:
+                            goodbye_detected = any(phrase in idx for phrase in ["allah hafiz", "اللہ حافظ", "khuda hafiz", "goodbye", "bye"])
+                            terminal_tool_called = any(
+                                h.get("tool_name") in ["book_appointment", "place_order"]
+                                for h in self._call_history
+                            )
+                            
+                            if goodbye_detected:
                                 logger.info(
                                     "[SIP Call %s] Goodbye detected, ending call in 5s",
-                                    self._session_uuid[:8],
+                                    self._session_uuid[:8]
                                 )
                                 await asyncio.sleep(5)
                                 self._running = False
@@ -605,8 +611,9 @@ class SIPServer:
         self.mode = SIP_MODE
         self.phone = None
 
-        local_ip = _get_local_ip()
-        logger.info("[SIP Server] Local IP detected: %s", local_ip)
+        from .sip_config import SIP_BIND_IP
+        local_ip = SIP_BIND_IP if SIP_BIND_IP and SIP_BIND_IP != "0.0.0.0" else _get_local_ip()
+        print(f"[DEBUG] Using IP: {local_ip}", flush=True)
 
         if SIP_MODE == "multinet":
             # Register as a SIP client to Multinet

@@ -11,10 +11,18 @@ venv/
 env/
 .env/
 .venv/
-
-.claude/
+.claude
 .gemini/
 .planning/
+cavemen_compress_nlp.py
+pjsip.conf
+pjsip_copy.conf
+seed_burger_menu.py
+seed_cheezious_menu.py
+seed_demo_orders.py
+db copy.sqlite3
+sara_prompt.txt
+sara_compressed.txt
 # Environment Variables
 .env
 .env.local

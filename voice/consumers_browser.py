@@ -15,7 +15,7 @@ import urllib.parse
 import truststore
 truststore.inject_into_ssl()
 
-from .consumers1 import VoiceAgentConsumer, MIC_RATE, OUT_RATE, _save_wav
+from .consumers import VoiceAgentConsumer, MIC_RATE, OUT_RATE, _save_wav
 from .agents.registry import get_agent
 
 logger = logging.getLogger(__name__)
@@ -284,6 +284,13 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
 
                             result = await self._execute_tool(tool_name, tool_args)
                             print(f"[BrowserWS] [Tool Result] {tool_name} → {result}", flush=True)
+                            
+                            self._call_history.append({
+                                "role": "tool",
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                                "tool_result": result,
+                            })
 
                             function_responses.append(
                                 types.FunctionResponse(
@@ -359,24 +366,21 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                             idx = self._current_agent_turn.lower()
 
                             # Check if goodbye was said
-                            goodbye_detected = "allah hafiz" in idx or "اللہ حافظ" in idx or "khuda hafiz" in idx
+                            goodbye_detected = any(phrase in idx for phrase in ["allah hafiz", "اللہ حافظ", "khuda hafiz", "goodbye", "bye"])
 
-                            # Check if book_appointment was ever called
-                            book_appointment_called = any(
-                                h.get("tool_name") == "book_appointment"
+                            # Check if a terminal tool was ever successfully called
+                            terminal_tool_called = any(
+                                h.get("tool_name") in ["book_appointment", "place_order"]
                                 for h in self._call_history
-                            )
-                            place_order_called = any(
-                                h.get("tool_name") == "place_order"
-                                for h in self._call_history
-                            )
-                            has_confirmed = self._booking_state == "confirmed"
+                            ) or getattr(self, "_booking_state", None) == "booked"
+
+                            has_confirmed = getattr(self, "_booking_state", None) == "confirmed"
 
                             if goodbye_detected:
                                 if self._pending_tool_calls > 0:
                                     print(f"[BrowserWS] Model said goodbye but {self._pending_tool_calls} tool call(s) pending — NOT disconnecting.", flush=True)
-                                elif has_confirmed and not book_appointment_called and not place_order_called:
-                                    print(f"[BrowserWS] CRITICAL: User confirmed but book_appointment/place_order was NEVER called! Blocking disconnect.", flush=True)
+                                elif has_confirmed and not terminal_tool_called:
+                                    print(f"[BrowserWS] CRITICAL: User confirmed but terminal tool was NEVER called! Blocking disconnect.", flush=True)
                                     self._should_end_call = False
                                 else:
                                     print(f"[BrowserWS] Detected goodbye — scheduling disconnect.", flush=True)
