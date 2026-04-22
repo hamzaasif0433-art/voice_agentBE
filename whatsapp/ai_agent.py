@@ -1,33 +1,107 @@
 """
-ai_agent.py — WhatsApp AI agent using Groq LLM.
+ai_agent.py — WhatsApp AI agent using Gemini.
 
 Tool calls are parsed from LLM text output using the pattern:
     TOOL_CALL|<tool_name>|<json_payload>
 
 Flow per turn:
-    1. Send conversation history + system prompt to Groq.
+    1. Send conversation history + system prompt to Gemini (AI Studio).
     2. Parse LLM reply for a TOOL_CALL line.
     3. Execute the tool, inject result as a system message.
     4. Re-call the LLM so it can continue the conversation naturally.
     5. Return the final reply to the customer.
+
+Fallback (503 / quota errors):
+    - Retries the AI Studio call up to MAX_RETRIES times with exponential backoff.
+    - If all retries fail, transparently switches to Vertex AI for the same call.
+    - Conversation history is fully preserved across the switch.
 """
 
 import json
 import logging
+import os
 import re
+import time
 from google import genai
+from google.oauth2 import service_account
 
 from whatsapp.prompt_builder import (
-    build_router_prompt, 
-    build_restaurant_prompt, 
-    build_healthcare_prompt
+    build_router_prompt,
+    build_restaurant_prompt,
+    build_healthcare_prompt,
 )
 from whatsapp.tools import (
-    menu, place_order, 
-    get_schedule, get_available_slots, book_appointment
+    menu, place_order,
+    get_schedule, get_available_slots, book_appointment,
 )
 
 log = logging.getLogger(__name__)
+
+# ── Vertex AI fallback client (lazy, built once) ──────────────────────────────
+_vertex_client: genai.Client | None = None
+
+
+def _get_vertex_client() -> genai.Client:
+    """Lazy-initialise and return the Vertex AI genai.Client."""
+    global _vertex_client
+    if _vertex_client is not None:
+        return _vertex_client
+
+    # Reuse the service-account JSON that the voice consumer already reads.
+    raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    project   = os.environ.get("VERTEX_PROJECT", "")
+    location  = os.environ.get("VERTEX_LOCATION", "us-central1")
+
+    if raw_json and project:
+        try:
+            sa_info = json.loads(raw_json)
+            sa_info["private_key"] = sa_info["private_key"].replace("\\n", "\n")
+            credentials = service_account.Credentials.from_service_account_info(
+                sa_info,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            _vertex_client = genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+                credentials=credentials,
+            )
+            log.info("[WhatsApp AI] Vertex AI client initialised (project=%s, location=%s)", project, location)
+            return _vertex_client
+        except Exception as exc:
+            log.warning("[WhatsApp AI] Vertex AI client init failed: %s", exc)
+
+    log.warning("[WhatsApp AI] Vertex AI credentials unavailable — fallback will not work")
+    return None  # type: ignore[return-value]
+
+
+# ── Fallback error classification ─────────────────────────────────────────────
+
+MAX_RETRIES    = 3   # AI Studio retries before switching to Vertex AI
+RETRY_BACKOFF  = [1, 2, 4]  # seconds between each retry attempt
+
+_FALLBACK_TRIGGERS = (
+    "503",
+    "service unavailable",
+    "unavailable",
+    "model not available",
+    "overloaded",
+    "resource has been exhausted",
+    "quota",
+    "rate limit",
+    "429",
+)
+
+
+def _is_retriable_error(exc: Exception) -> bool:
+    """Return True if *exc* warrants a retry or Vertex AI fallback."""
+    err_str  = str(exc).lower()
+    err_type = type(exc).__name__.lower()
+    return (
+        any(t in err_str for t in _FALLBACK_TRIGGERS)
+        or "serviceunavailable" in err_type
+        or "resourceexhausted" in err_type
+    )
 
 # ── In-memory state ──────────────────────────────────────────────────────────
 conversation_history: dict[str, list] = {}
@@ -104,6 +178,87 @@ def _execute_tool(tool_name: str, payload: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Gemini call with retry + Vertex AI fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _call_gemini_with_fallback(client: genai.Client, history: list, system_msg: str):
+    """
+    Call Gemini generate_content with:
+      1. Up to MAX_RETRIES retries on the primary AI Studio client (with backoff).
+      2. If all retries fail with a 503/quota error, fall back to Vertex AI.
+      3. Return the response object, or None if everything failed.
+
+    The *history* list and *system_msg* are forwarded unchanged — no context is lost.
+    """
+    from google.genai import types
+
+    def _build_contents():
+        contents = []
+        for msg in history:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])])
+            )
+        return contents
+
+    config = types.GenerateContentConfig(
+        system_instruction=system_msg,
+        temperature=0.6,
+    )
+
+    # ── Stage 1: Retry primary AI Studio client ────────────────────────────
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=_build_contents(),
+                config=config,
+            )
+            if attempt > 0:
+                log.info("[WhatsApp AI] AI Studio succeeded on retry %d", attempt + 1)
+            return response
+        except Exception as exc:
+            last_exc = exc
+            if _is_retriable_error(exc):
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                log.warning(
+                    "[WhatsApp AI] AI Studio attempt %d/%d failed (%s: %s). Retrying in %ds…",
+                    attempt + 1, MAX_RETRIES, type(exc).__name__, exc, wait,
+                )
+                time.sleep(wait)
+            else:
+                # Non-transient error — no point retrying
+                log.error("[WhatsApp AI] Non-retriable AI Studio error: %s", exc)
+                return None
+
+    # ── Stage 2: Vertex AI fallback ────────────────────────────────────────
+    log.warning(
+        "[WhatsApp AI] All %d AI Studio retries exhausted (%s). Switching to Vertex AI.",
+        MAX_RETRIES, last_exc,
+    )
+    vertex_client = _get_vertex_client()
+    if vertex_client is None:
+        log.error("[WhatsApp AI] Vertex AI fallback unavailable — no credentials configured.")
+        return None
+
+    try:
+        response = vertex_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=_build_contents(),
+            config=config,
+        )
+        log.info("[WhatsApp AI] Vertex AI fallback succeeded.")
+        return response
+    except Exception as vertex_exc:
+        log.error(
+            "[WhatsApp AI] Vertex AI fallback ALSO failed: %s: %s",
+            type(vertex_exc).__name__, vertex_exc,
+        )
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -132,26 +287,14 @@ def generate_reply(phone: str, user_message: str, client: genai.Client) -> tuple
 
     # ── Agentic loop: keep going until no more tool calls or ROUTE tags ──────
     for loop_count in range(MAX_TOOL_LOOPS):
-        try:
-            from google.genai import types
-            gemini_contents = []
-            for msg in history:
-                role = "user" if msg["role"] == "user" else "model"
-                gemini_contents.append(
-                    types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])])
-                )
-                
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=gemini_contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_msg,
-                    temperature=0.6,
-                )
-            )
-        except Exception as e:
-            log.error("Gemini API error: %s", e)
-            return "Sorry, abhi system mein masla hai. Thori der baad try karein.", None, ""
+        response = _call_gemini_with_fallback(
+            client=client,
+            history=history,
+            system_msg=system_msg,
+        )
+        if response is None:
+            # All retries and Vertex AI fallback failed
+            return "Sorry, abhi service temporarily unavailable hai. Thori der baad try karein. 🙏", None, ""
 
         raw_reply = response.text.strip()
 

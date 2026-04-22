@@ -17,14 +17,19 @@ import os
 import logging
 import tempfile
 import threading
+import time
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from google import genai
 
-from whatsapp.ai_agent import generate_reply
+from whatsapp.ai_agent import generate_reply, _get_vertex_client, _is_retriable_error
 
 log = logging.getLogger(__name__)
+
+# TTS retry settings — separate from LLM retries (TTS is more forgiving)
+_TTS_MAX_RETRIES   = 2
+_TTS_RETRY_BACKOFF = [1, 3]  # seconds
 
 # ── Lazy-initialized clients ──────────────────────────────────────────────────
 _gemini_client = None
@@ -102,48 +107,90 @@ async def synthesize_voice_sana_async(text: str, language: str = "ur-PK") -> byt
     """
     Synthesize speech using Gemini TTS API.
     Returns audio bytes in WAV format.
+
+    Resilience:
+      - Retries AI Studio up to _TTS_MAX_RETRIES times on 503/quota errors.
+      - Falls back to Vertex AI if all retries fail.
+      - Returns empty bytes if everything fails (caller will send text instead).
     """
     from google.genai import types
+    import asyncio
     import io
     import wave
 
-    client = _get_gemini_client()
-
-    # Female voice configuration
     voice_name = "Aoede"  # Female voice (Aoede, Kore, or Leda)
 
-    try:
-        # Generate audio using generate_content API
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=text,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=voice_name,
-                        )
-                    )
-                ),
-            ),
-        )
+    tts_config = types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=voice_name,
+                )
+            )
+        ),
+    )
 
-        # Extract audio data
+    def _extract_wav(response) -> bytes:
         pcm_data = response.candidates[0].content.parts[0].inline_data.data
-
-        # Wrap PCM data in WAV header (24kHz, 16-bit, mono)
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)  # Mono
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(24000)  # 24kHz
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
             wav_file.writeframes(pcm_data)
-
         return wav_buffer.getvalue()
 
-    except Exception as e:
-        log.error("TTS synthesis error: %s", e)
+    # ── Stage 1: Retry primary AI Studio client ──────────────────────────
+    primary_client = _get_gemini_client()
+    last_exc: Exception | None = None
+
+    for attempt in range(_TTS_MAX_RETRIES):
+        try:
+            response = await primary_client.aio.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=text,
+                config=tts_config,
+            )
+            if attempt > 0:
+                log.info("[WhatsApp TTS] AI Studio succeeded on retry %d", attempt + 1)
+            return _extract_wav(response)
+        except Exception as exc:
+            last_exc = exc
+            if _is_retriable_error(exc):
+                wait = _TTS_RETRY_BACKOFF[min(attempt, len(_TTS_RETRY_BACKOFF) - 1)]
+                log.warning(
+                    "[WhatsApp TTS] AI Studio attempt %d/%d failed (%s). Retrying in %ds…",
+                    attempt + 1, _TTS_MAX_RETRIES, exc, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                log.error("[WhatsApp TTS] Non-retriable TTS error: %s", exc)
+                return b""
+
+    # ── Stage 2: Vertex AI TTS fallback ─────────────────────────────────
+    log.warning(
+        "[WhatsApp TTS] All AI Studio retries exhausted (%s). Switching to Vertex AI TTS.",
+        last_exc,
+    )
+    vertex_client = _get_vertex_client()
+    if vertex_client is None:
+        log.error("[WhatsApp TTS] Vertex AI fallback unavailable.")
+        return b""
+
+    try:
+        response = await vertex_client.aio.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=text,
+            config=tts_config,
+        )
+        log.info("[WhatsApp TTS] Vertex AI TTS fallback succeeded.")
+        return _extract_wav(response)
+    except Exception as vertex_exc:
+        log.error(
+            "[WhatsApp TTS] Vertex AI TTS fallback ALSO failed: %s",
+            vertex_exc,
+        )
         return b""
 
 
@@ -189,7 +236,7 @@ def send_voice_message(chat_id: str, audio_bytes: bytes):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def download_and_transcribe(download_url: str) -> str:
-    """Download a voice note and transcribe via Groq Whisper."""
+    """Download a voice note and transcribe using Gemini (with retry + Vertex AI fallback)."""
     if not download_url:
         return ""
 
@@ -205,24 +252,58 @@ def download_and_transcribe(download_url: str) -> str:
         with open(tmp_path, "wb") as f:
             f.write(resp.content)
 
-        client = _get_gemini_client()
         with open(tmp_path, "rb") as f:
             audio_bytes = f.read()
-            
+
         from google.genai import types
-        
-        # We use Gemini 2.5 Flash to transcribe the audio natively
-        result = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(data=audio_bytes, mime_type='audio/ogg'),
-                "Transcribe the following audio exactly as spoken, without adding any extra commentary."
-            ]
+
+        def _do_transcribe(client: genai.Client) -> str:
+            result = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg"),
+                    "Transcribe the following audio exactly as spoken, without adding any extra commentary.",
+                ],
+            )
+            return result.text.strip()
+
+        # ── Stage 1: Retry AI Studio ──────────────────────────────────────
+        primary_client = _get_gemini_client()
+        last_exc: Exception | None = None
+        for attempt in range(2):  # 2 attempts before Vertex fallback
+            try:
+                text = _do_transcribe(primary_client)
+                if attempt > 0:
+                    log.info("[WhatsApp STT] AI Studio succeeded on retry %d", attempt + 1)
+                log.info("Transcribed voice: %s", text)
+                return text
+            except Exception as exc:
+                last_exc = exc
+                if _is_retriable_error(exc):
+                    log.warning(
+                        "[WhatsApp STT] AI Studio attempt %d failed (%s). Retrying…",
+                        attempt + 1, exc,
+                    )
+                    time.sleep(2)
+                else:
+                    log.error("[WhatsApp STT] Non-retriable transcription error: %s", exc)
+                    return ""
+
+        # ── Stage 2: Vertex AI transcription fallback ─────────────────────
+        log.warning(
+            "[WhatsApp STT] AI Studio transcription retries exhausted (%s). Trying Vertex AI.",
+            last_exc,
         )
-        
-        transcribed_text = result.text.strip()
-        log.info("Transcribed voice: %s", transcribed_text)
-        return transcribed_text
+        vertex_client = _get_vertex_client()
+        if vertex_client is not None:
+            try:
+                text = _do_transcribe(vertex_client)
+                log.info("[WhatsApp STT] Vertex AI transcription succeeded: %s", text)
+                return text
+            except Exception as vertex_exc:
+                log.error("[WhatsApp STT] Vertex AI transcription also failed: %s", vertex_exc)
+
+        return ""
 
     except Exception as e:
         log.error("Transcribe error: %s", e)
