@@ -791,9 +791,31 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                         )
                     )
                     print("[WS FALLBACK] Resume cue sent. Entering receive loop...", flush=True)
+                    # Signal browser to open mic after fallback cue
+                    if self._transport == "browser":
+                        try:
+                            await self.send(text_data=json.dumps({"type": "session_ready"}))
+                        except Exception:
+                            pass
                 else:
                     print(f"[WS DEBUG] _on_gemini_ready done, starting greeting...", flush=True)
+                    # Signal browser BEFORE greeting starts so AudioContext can
+                    # warm up — but mic audio is suppressed by greetingPlayingRef
+                    # until greeting_ended arrives.
+                    if self._transport == "browser":
+                        try:
+                            await self.send(text_data=json.dumps({"type": "greeting_started"}))
+                        except Exception:
+                            pass
                     await self._handle_greeting(session)
+                    # Signal browser that greeting audio is fully queued.
+                    # The mic gate will open after all audio chunks have played.
+                    if self._transport == "browser":
+                        try:
+                            await self.send(text_data=json.dumps({"type": "greeting_ended"}))
+                            await self.send(text_data=json.dumps({"type": "session_ready"}))
+                        except Exception:
+                            pass
                     print(f"[WS DEBUG] Greeting done, entering receive loop...", flush=True)
 
                 await self._receive_loop(session)
@@ -842,6 +864,17 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         print("[WS] _handle_greeting completed", flush=True)
 
     async def _stream_pcm_to_sip(self, pcm_24k: bytes):
+        """Stream PCM audio to the client.
+        
+        - For browser transport: send raw 24kHz PCM directly (the frontend
+          creates an AudioBuffer at OUT_RATE and plays it via Web Audio API).
+        - For SIP/Twilio transports: downsample to 8kHz µ-law before sending.
+        """
+        if self._transport == "browser":
+            # Browser expects raw PCM24k bytes — no downsample needed
+            await self._send_audio_chunk(pcm_24k)
+            return
+        # SIP/Twilio path: downsample 24k → 8k → µ-law
         pcm_8k, self._downsample_state = audioop.ratecv(
             pcm_24k, 2, 1, OUT_RATE, SIP_RATE, self._downsample_state
         )
