@@ -634,10 +634,19 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 self._clear_session_state()
                 await asyncio.sleep(0.5)  # Brief pause before reconnect
 
+                # Snapshot the conversation so far — passed into Vertex session
+                history_snapshot = list(self._call_history)
+                if history_snapshot:
+                    print(
+                        f"[WS FALLBACK] Carrying {len(history_snapshot)} history turns into Vertex AI session.",
+                        flush=True,
+                    )
+
                 try:
                     await self._run_gemini_session(
                         client=self._vertex_client,
                         model=VERTEX_LIVE_MODEL,
+                        prior_history=history_snapshot,
                     )
                 except Exception as fallback_exc:
                     print(
@@ -653,16 +662,21 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 # Non-503 error — re-raise so the original handler sees it
                 raise
 
-    async def _run_gemini_session(self, client=None, model: str = None):
+    async def _run_gemini_session(self, client=None, model: str = None, prior_history: list = None):
         """Open a Gemini Live session using the given *client* and *model*.
 
         Both the primary (AI Studio) and the Vertex AI fallback call this same
         method — the only difference is the client instance and model string.
+        When *prior_history* is provided (503 fallback path), the conversation
+        context is injected into the system prompt so Vertex AI continues
+        mid-call without losing what was already said.
         """
         if client is None:
             client = self.client
         if model is None:
             model = LIVE_MODEL
+
+        is_fallback = bool(prior_history)  # True only on the Vertex retry path
 
         t_start = time.time()
         voice_name    = self._get_voice_name()
@@ -680,6 +694,36 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         t2 = time.time()
         system_prompt = self._get_system_prompt(has_cached_greeting=has_cached_greeting, schedule_data=schedule_data)
         print(f"[WS DEBUG] _get_system_prompt took {time.time()-t2:.2f}s", flush=True)
+
+        # ── Inject prior conversation history when falling back to Vertex AI ──
+        if is_fallback and prior_history:
+            history_lines = []
+            for entry in prior_history:
+                role = entry.get("role", "unknown")
+                if role == "user":
+                    history_lines.append(f"Patient: {entry.get('text', '')}")
+                elif role == "agent":
+                    history_lines.append(f"Agent: {entry.get('text', '')}")
+                elif role == "tool":
+                    history_lines.append(
+                        f"[Tool '{entry.get('tool_name')}' called with {entry.get('tool_args')}, "
+                        f"result: {entry.get('tool_result')}]"
+                    )
+            if history_lines:
+                system_prompt += (
+                    "\n\n---\n"
+                    "# CONVERSATION HISTORY (recorded before network failover)\n"
+                    "The following exchange already took place on this call before you joined. "
+                    "Do NOT re-greet or re-introduce yourself. "
+                    "Continue naturally from where the conversation left off, "
+                    "acknowledging any information the patient already provided.\n\n"
+                    + "\n".join(history_lines)
+                    + "\n---"
+                )
+                print(
+                    f"[WS FALLBACK] Injected {len(history_lines)} history lines into Vertex system prompt.",
+                    flush=True,
+                )
         
         t3 = time.time()
         tools         = self._get_tools()
@@ -704,7 +748,11 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             context_window_compression=types.ContextWindowCompressionConfig(
                 sliding_window=types.SlidingWindow(),
             ),
-            session_resumption=types.SessionResumptionConfig(handle=self._last_session_handle),
+            # NOTE: session_resumption handle is AI-Studio-specific;
+            # on Vertex fallback we start a fresh session (history is in the prompt).
+            session_resumption=types.SessionResumptionConfig(
+                handle=None if is_fallback else self._last_session_handle
+            ),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=False,
@@ -729,9 +777,25 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 self._session_ready.set()
 
                 await self._on_gemini_ready()
-                print(f"[WS DEBUG] _on_gemini_ready done, starting greeting...", flush=True)
-                await self._handle_greeting(session)
-                print(f"[WS DEBUG] Greeting done, entering receive loop...", flush=True)
+
+                if is_fallback:
+                    # Don't replay the greeting — the patient is still on the line.
+                    # Send a silent resume cue so the AI waits for the patient to speak.
+                    print("[WS FALLBACK] Skipping greeting — sending resume cue to Vertex AI.", flush=True)
+                    await session.send_realtime_input(
+                        text=(
+                            "[System: You have seamlessly taken over this call due to a brief network issue. "
+                            "The patient is still on the line. Do not re-greet or mention the switch. "
+                            "Gently acknowledge the pause with one short phrase (e.g. 'Sorry about that brief pause — "
+                            "where were we?') and continue naturally.]"
+                        )
+                    )
+                    print("[WS FALLBACK] Resume cue sent. Entering receive loop...", flush=True)
+                else:
+                    print(f"[WS DEBUG] _on_gemini_ready done, starting greeting...", flush=True)
+                    await self._handle_greeting(session)
+                    print(f"[WS DEBUG] Greeting done, entering receive loop...", flush=True)
+
                 await self._receive_loop(session)
 
                 if not self._disconnecting:
