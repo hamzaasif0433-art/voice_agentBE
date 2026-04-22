@@ -21,6 +21,7 @@ from .agents.registry import get_agent
 logger = logging.getLogger(__name__)
 
 BROWSER_PCM_CHUNK = 4800  # ~100ms at 24kHz PCM16
+HEARTBEAT_INTERVAL = 20   # seconds between keep-alive pings to mobile clients
 
 
 def _parse_query(scope) -> dict:
@@ -40,6 +41,7 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         self._agent_cfg = None
         self._voice = "Aoede"
         self._language = "ur-PK"
+        self._heartbeat_task = None
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle — resolve agent config first
@@ -68,15 +70,26 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
         # Delegate to parent (creates Gemini client, starts session task)
         await super().connect()
 
+        # Start keep-alive heartbeat to prevent mobile browsers from killing the WS
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._tasks.append(self._heartbeat_task)
+
     # ------------------------------------------------------------------
     # Override: send session_ready JSON to browser after Gemini connects
     # ------------------------------------------------------------------
 
     async def _on_gemini_ready(self):
-        """Called by parent after Gemini Live session opens. Notify browser."""
+        """Called by parent after Gemini Live session opens.
+
+        We send ONLY the audio config metadata here (sample rates, agent info)
+        so the browser can configure its AudioContext.  We deliberately do NOT
+        send 'session_ready' at this point — that signal is sent by the parent
+        (_run_gemini_session) AFTER the greeting has finished playing, so the
+        browser mic gate opens only when the user is actually expected to speak.
+        """
         try:
             msg = json.dumps({
-                "event": "session_ready",
+                "event": "audio_config",   # <-- renamed from session_ready
                 "output_sample_rate": OUT_RATE,
                 "input_sample_rate": MIC_RATE,
                 "agent_id": self._agent_cfg["id"],
@@ -84,11 +97,10 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
                 "voice": self._voice,
                 "language": self._language,
             })
-            # print(f"[BrowserWS] Sending session_ready: {msg}", flush=True)
             await self.send(text_data=msg)
-            # print("[BrowserWS] Sent session_ready to browser", flush=True)
+            print("[BrowserWS] Sent audio_config to browser (session_ready will follow after greeting)", flush=True)
         except Exception as e:
-            print(f"[BrowserWS] ERROR Failed to send session_ready: {e}", flush=True)
+            print(f"[BrowserWS] ERROR Failed to send audio_config: {e}", flush=True)
 
     # ------------------------------------------------------------------
     # Override: expose dynamic config to parent _run_gemini_session
@@ -181,12 +193,38 @@ class BrowserVoiceConsumer(VoiceAgentConsumer):
             print(f">>> [BrowserWS] Error forwarding audio to Gemini: {e}", flush=True)
 
     async def disconnect(self, close_code):
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
         if hasattr(self, '_debug_mic_buffer') and len(self._debug_mic_buffer) > 0:
             from django.conf import settings
             debug_path = settings.BASE_DIR / "media/debug_mic.wav"
             _save_wav(bytes(self._debug_mic_buffer), debug_path, MIC_RATE)
-            # print(f"[BrowserWS] Saved {len(self._debug_mic_buffer)} bytes of microphone audio to {debug_path}")
         await super().disconnect(close_code)
+
+    # ------------------------------------------------------------------
+    # Heartbeat — keep mobile WebSocket connections alive
+    # ------------------------------------------------------------------
+
+    async def _heartbeat_loop(self):
+        """Send a lightweight JSON ping every HEARTBEAT_INTERVAL seconds.
+
+        Mobile browsers (iOS Safari, Android Chrome) will silently kill WebSocket
+        connections that appear idle. A regular ping prevents this and also lets
+        the backend detect dead connections faster than the TCP timeout would.
+        """
+        try:
+            while not self._disconnecting:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                if self._disconnecting:
+                    break
+                try:
+                    await self.send(text_data=json.dumps({"type": "ping"}))
+                except Exception:
+                    # Connection is already gone — stop the loop cleanly
+                    break
+        except asyncio.CancelledError:
+            pass
+
 
     # ------------------------------------------------------------------
     # Override: stream raw PCM16 to browser or defer to parent for Twilio

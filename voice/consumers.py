@@ -596,12 +596,26 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
 
     @staticmethod
     def _is_503_error(exc: Exception) -> bool:
-        """Return True if *exc* indicates a 503 / model-unavailable response."""
+        """Return True if *exc* should trigger a Vertex AI fallback.
+
+        Covers:
+        - 503 / Service Unavailable (model overloaded)
+        - 1011 Resource Exhausted (quota exceeded on the Live API)
+        """
         err_str = str(exc).lower()
         err_type = type(exc).__name__.lower()
-        # Covers google.api_core.exceptions.ServiceUnavailable, grpc StatusCode.UNAVAILABLE,
-        # and plain HTTP 503 / text messages from the Live API gateway.
-        triggers = ("503", "service unavailable", "unavailable", "model not available", "overloaded")
+        triggers = (
+            "503",
+            "service unavailable",
+            "unavailable",
+            "model not available",
+            "overloaded",
+            # Quota / resource exhaustion — Live API returns code 1011
+            "resource has been exhausted",
+            "quota",
+            "rate limit",
+            "429",
+        )
         return any(t in err_str for t in triggers) or "serviceunavailable" in err_type
 
     async def _run_gemini_session_with_fallback(self):
@@ -616,8 +630,8 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
                 return
             if self._is_503_error(primary_exc):
                 print(
-                    f"[WS FALLBACK] Primary 503 detected ({type(primary_exc).__name__}: {primary_exc}). "
-                    "Switching to Vertex AI (Gemini 2.5 native audio)...",
+                    f"[WS FALLBACK] Primary failure — switching to Vertex AI. "
+                    f"Reason: {type(primary_exc).__name__}: {primary_exc}",
                     flush=True,
                 )
                 # Notify the UI / Twilio client that we're switching models
