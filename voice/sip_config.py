@@ -9,6 +9,7 @@ import os
 
 # ── SIP Mode ─────────────────────────────────────────────────────────
 SIP_MODE = os.environ.get("SIP_MODE", "local")  # "local" or "multinet"
+SIP_PUBLIC_IP = os.environ.get("SIP_PUBLIC_IP", "")
 
 # ── Local-mode settings (pyVoIP acts as SIP server) ──────────────────
 SIP_BIND_IP = os.environ.get("SIP_BIND_IP", "0.0.0.0")

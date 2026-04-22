@@ -329,8 +329,9 @@ TOOLS = [
     )
 ]
 
-LIVE_MODEL = "gemini-3.1-flash-live-preview"
-VOICE_NAME = "Aoede"
+LIVE_MODEL        = "gemini-3.1-flash-live-preview"
+VERTEX_LIVE_MODEL = "gemini-2.5-flash-preview-native-audio-dialog"  # Vertex AI fallback — native audio
+VOICE_NAME        = "Aoede"
 
 
 # ---------------------------------------------------------------------------
@@ -402,13 +403,19 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
         #     flush=True,
         # )
 
-        # Use Direct Google AI Studio API for Gemini 3.1 Flash Live Preview
+        # Primary: Direct Google AI Studio API (Gemini 3.1 Flash Live Preview)
         self.client = await sync_to_async(
             lambda: genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         )()
-        print(f"[WS Connect] Gemini client created (Direct API)", flush=True)
+        print(f"[WS Connect] Gemini client created (Direct API, primary)", flush=True)
 
-        task = asyncio.create_task(self._run_gemini_session())
+        # Fallback: Vertex AI client — used if primary returns 503
+        self._vertex_client = await sync_to_async(
+            lambda: genai.Client(vertexai=True, project=_PROJECT, location=_LOCATION, credentials=_credentials)
+        )()
+        print(f"[WS Connect] Vertex AI client created (fallback)", flush=True)
+
+        task = asyncio.create_task(self._run_gemini_session_with_fallback())
         self._tasks.append(task)
 
     async def receive(self, bytes_data=None, text_data=None):
@@ -583,7 +590,80 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
     # Gemini Live session
     # ------------------------------------------------------------------
 
-    async def _run_gemini_session(self):
+    # ------------------------------------------------------------------
+    # Fallback wrapper — retries with Vertex AI on 503
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_503_error(exc: Exception) -> bool:
+        """Return True if *exc* indicates a 503 / model-unavailable response."""
+        err_str = str(exc).lower()
+        err_type = type(exc).__name__.lower()
+        # Covers google.api_core.exceptions.ServiceUnavailable, grpc StatusCode.UNAVAILABLE,
+        # and plain HTTP 503 / text messages from the Live API gateway.
+        triggers = ("503", "service unavailable", "unavailable", "model not available", "overloaded")
+        return any(t in err_str for t in triggers) or "serviceunavailable" in err_type
+
+    async def _run_gemini_session_with_fallback(self):
+        """Attempt session on primary (AI Studio). Fall back to Vertex AI on 503."""
+        try:
+            await self._run_gemini_session(
+                client=self.client,
+                model=LIVE_MODEL,
+            )
+        except Exception as primary_exc:
+            if self._disconnecting:
+                return
+            if self._is_503_error(primary_exc):
+                print(
+                    f"[WS FALLBACK] Primary 503 detected ({type(primary_exc).__name__}: {primary_exc}). "
+                    "Switching to Vertex AI (Gemini 2.5 native audio)...",
+                    flush=True,
+                )
+                # Notify the UI / Twilio client that we're switching models
+                try:
+                    await self.send(text_data=json.dumps({
+                        "type": "status",
+                        "code": "fallback_vertex",
+                        "message": "Switching to Vertex AI — please stay on the line.",
+                    }))
+                except Exception:
+                    pass  # OK if the WS send fails (e.g. for Twilio transport)
+
+                # Reset session state before retrying
+                self._clear_session_state()
+                await asyncio.sleep(0.5)  # Brief pause before reconnect
+
+                try:
+                    await self._run_gemini_session(
+                        client=self._vertex_client,
+                        model=VERTEX_LIVE_MODEL,
+                    )
+                except Exception as fallback_exc:
+                    print(
+                        f"[WS ERROR] Vertex AI fallback ALSO failed: "
+                        f"{type(fallback_exc).__name__}: {fallback_exc}",
+                        flush=True,
+                    )
+                    import traceback
+                    traceback.print_exc()
+                    self._clear_session_state()
+                    await self.close()
+            else:
+                # Non-503 error — re-raise so the original handler sees it
+                raise
+
+    async def _run_gemini_session(self, client=None, model: str = None):
+        """Open a Gemini Live session using the given *client* and *model*.
+
+        Both the primary (AI Studio) and the Vertex AI fallback call this same
+        method — the only difference is the client instance and model string.
+        """
+        if client is None:
+            client = self.client
+        if model is None:
+            model = LIVE_MODEL
+
         t_start = time.time()
         voice_name    = self._get_voice_name()
         language_code = self._get_language_code()
@@ -636,12 +716,12 @@ class VoiceAgentConsumer(AsyncWebsocketConsumer):
             ),
         )
 
-        print(f"[WS DEBUG] Config built. Model={LIVE_MODEL}. Connecting to Gemini Live...", flush=True)
+        print(f"[WS DEBUG] Config built. Model={model}. Connecting to Gemini Live...", flush=True)
         t0 = time.time()
 
         try:
-            async with self.client.aio.live.connect(
-                model=LIVE_MODEL, config=live_config
+            async with client.aio.live.connect(
+                model=model, config=live_config
             ) as session:
                 elapsed = time.time() - t0
                 print(f"[WS] ✅ Gemini Live session OPEN in {elapsed:.2f}s", flush=True)
